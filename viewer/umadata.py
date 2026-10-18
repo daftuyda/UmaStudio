@@ -248,8 +248,41 @@ class GameData:
                   for d in dresses if d["chara"] in (0, c["id"]) and self.body_paths(c, d)]
             if ds:
                 out.append({**c, "dresses": ds})
-        self._charas = {c["id"]: c for c in charas}
+        mobs = self.mobs(dresses)
+        out += mobs
+        self._charas = {c["id"]: c for c in charas + mobs}
         self._dresses = {d["id"]: d for d in dresses}
+        return out
+
+    def mobs(self, dresses):
+        """Background Umas: the generic head's face and hair parts, recoloured per mob, on the
+        shared outfits. Height and shape are fixed for them, as in the game."""
+        db = sqlite3.connect(f"file:{MASTER}?mode=ro", uri=True)
+        db.row_factory = sqlite3.Row
+        try:
+            names = dict(db.execute("SELECT [index], text FROM text_data WHERE category = 59"))
+            hair = {r["id"]: dict(r) for r in db.execute("SELECT * FROM mob_hair_color_set")}
+            dress = {r["id"]: dict(r) for r in db.execute("SELECT * FROM mob_dress_color_set")}
+            rows = [dict(r) for r in db.execute("SELECT * FROM mob_data ORDER BY mob_id")]
+        finally:
+            db.close()
+        head = "3d/chara/head/chr0001_00/pfb_chr0001_00_"
+        shared = [d for d in dresses if not d["chara"]]
+        out = []
+        for r in rows:
+            face, hairm = f"face{r['chara_face_model']:03d}", f"hair{r['chara_hair_model']:03d}"
+            if not all(head + part in self.entries and self.entries[head + part].local for part in (face, hairm)):
+                continue
+            c = {"id": r["mob_id"], "height": 1, "shape": 0, "bust": r["chara_bust_size"], "tail": 1,
+                 "skin": r["chara_skin_color"], "socks": r["socks"], "name": names.get(r["mob_id"], f"Mob {r['mob_id']}"),
+                 "mob": {"face": r["chara_face_model"], "hair": r["chara_hair_model"], "dress": r["dress_id"],
+                         "hair_cutoff": r["hair_cutoff"], "sex": r["sex"],
+                         "hair_colors": hair.get(r["chara_hair_color"], {}), "dress_colors": dress.get(r["dress_color_id"], {})}}
+            ds = [{"id": d["id"], "name": d["name"], "own": d["id"] == r["dress_id"]}
+                  for d in shared if self.body_paths(c, d)]
+            ds.sort(key=lambda d: not d["own"])
+            if ds:
+                out.append({**c, "dresses": ds})
         return out
 
     def body_paths(self, c, d):
@@ -292,6 +325,9 @@ class GameData:
                         if n in by_name:
                             paths.append(by_name[n])
                             break
+        if c.get("mob"):
+            # the outfit's recolour mask, for background Umas
+            paths += [p for p in self.prefix(body_dir + "textures/") if p.endswith("_area")]
         # physics for the outfit (variant 00, as the game loads it): spring chains, the bust (per bust
         # size on shared bodies) and skirt-vs-leg data. named after the folder, not the prefab, which
         # carries height/shape/bust suffixes on shared bodies.
@@ -299,16 +335,25 @@ class GameData:
         bust = f"bust{c['bust']}" if not d["chara"] else "bust"
         paths += [p for p in self.prefix(body_dir + "clothes/")
                   if p.endswith((f"pfb_{folder}_cloth00", f"pfb_{folder}_{bust}_cloth00", f"ast_{folder}_skirt00"))]
-        head_dir = f"3d/chara/head/chr{c['id']:04d}_{d['head_sub']:02d}/"
-        if not self.prefix(head_dir + "pfb_"):
-            head_dir = f"3d/chara/head/chr{c['id']:04d}_00/"
-        paths += [p for p in self.prefix(head_dir) if "/clothes/" not in p or p.endswith("_cloth00")]
+        if c.get("mob"):
+            # the generic head: just this mob's face and hair parts, their textures and hair physics
+            head_dir = "3d/chara/head/chr0001_00/"
+            parts = (f"face{c['mob']['face']:03d}", f"hair{c['mob']['hair']:03d}")
+            paths += [p for p in self.prefix(head_dir) if any(f"_{x}" in p for x in parts) and "_wet" not in p
+                      and ("/clothes/" not in p or p.endswith("_cloth00"))]
+            tail_id = "0001"
+        else:
+            head_dir = f"3d/chara/head/chr{c['id']:04d}_{d['head_sub']:02d}/"
+            if not self.prefix(head_dir + "pfb_"):
+                head_dir = f"3d/chara/head/chr{c['id']:04d}_00/"
+            paths += [p for p in self.prefix(head_dir) if "/clothes/" not in p or p.endswith("_cloth00")]
+            tail_id = f"{c['id']:04d}"
         tail = d["tail"] if d["tail"] > 0 else c["tail"]
         if tail > 0:
             tail_dir = f"3d/chara/tail/tail{tail:04d}_00/"
             paths += self.prefix(tail_dir + "pfb_")
             paths += [p for p in self.prefix(tail_dir + "clothes/") if p.endswith("_cloth00")]
-            paths += [p for p in self.prefix(tail_dir + "textures/") if f"_{c['id']:04d}_" in p or "_0000_" in p]
+            paths += [p for p in self.prefix(tail_dir + "textures/") if f"_{tail_id}_" in p or "_0000_" in p]
         if motions:
             paths += [p for p in self.prefix(f"3d/motion/event/body/chara/chr{c['id']:04d}_00/") if not p.endswith("_mirror")]
         return c, d, [p for p in paths if p in self.entries and self.entries[p].local]
@@ -330,6 +375,8 @@ class GameData:
         # what the converter needs to texture a shared outfit the way the game would
         info = {"chara": c["id"], "skin": c["skin"], "bust": c["bust"], "socks": c["socks"],
                 "body_type": d["body_type"], "body_sub": d["body_sub"], "shared": not d["chara"]}
+        if c.get("mob"):
+            info["mob"] = c["mob"]
         # only when it changed: a newer file in the pack makes the viewer convert it again
         path = os.path.join(folder, "pack.json")
         old = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else None

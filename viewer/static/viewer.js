@@ -86,11 +86,19 @@ $('#pickerClose').onclick = closePicker;
 $('#picker').addEventListener('mousedown', e => { if (e.target.id === 'picker' && current) closePicker(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && current) closePicker(); });
 
+// the main cast, or the background Umas (mobs) the races and events are filled with
+let umaKind = store.get('umaKind', 'main');
+$$('#umaKinds .chip').forEach(b => {
+  b.onclick = () => { umaKind = b.dataset.kind; store.set('umaKind', umaKind); radio('#umaKinds .chip', b); fillUmas(); };
+});
+radio('#umaKinds .chip', $(`#umaKinds .chip[data-kind="${umaKind}"]`));
+
 function fillUmas() {
   const f = $('#umaFilter').value.trim().toLowerCase();
   const box = $('#umaGrid');
   box.innerHTML = '';
   for (const c of charas) {
+    if (!!c.mob !== (umaKind === 'mob')) continue;
     if (f && !c.name.toLowerCase().includes(f) && !String(c.id).includes(f)) continue;
     const b = document.createElement('button');
     b.className = 'uma' + (current && current.chara === c.id ? ' on' : '');
@@ -221,6 +229,10 @@ async function loadModel(pack, manifest, sets, chara, dress) {
   if (idle) {
     const st = sets.find(x => x.parts.some(([, k]) => k === idle.name));
     await playClip(await ownClip(idle.name), idle.name, true, st ? st.title : 'idle');
+  } else {
+    // background Umas have no motions of their own: a plain standing loop from the library
+    const stand = '3d/motion/event/body/type00/anm_eve_type00_homestand01_loop';
+    await playClip(await libraryClip(stand), stand, true, 'Standing').catch(() => {});
   }
 }
 
@@ -1215,13 +1227,42 @@ function canvasTexture(src, draw) {
   return t;
 }
 
+/** Background Umas: the recolour (and the accessory cutoff) baked into a copy of the texture, the
+ *  same maths as MASK_GLSL in look.js. */
+function bakeMask(u, main) {
+  const img = main.image, W = img.width, H = img.height;
+  const read = (t, w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; const x = c.getContext('2d'); x.drawImage(t.image, 0, 0, w, h); return x.getImageData(0, 0, w, h).data; };
+  const mask = read(u.uMask.value, W, H);
+  const triple = u.uHairCut?.value > 0 && u.uTriple ? read(u.uTriple.value, W, H) : null;
+  const cols = u.uMaskC.value.map(v => [v.x, v.y, v.z]);
+  const w = (v, dir) => Math.min(1, Math.max(0, ((v - 0.5) * dir * 2 - 0.02) / 0.96));
+  return canvasTexture(main, (c, x) => {
+    c.width = W; c.height = H;
+    x.drawImage(img, 0, 0);
+    const d = x.getImageData(0, 0, W, H), px = d.data;
+    for (let i = 0; i < px.length; i += 4) {
+      let t = [1, 1, 1];
+      for (let ch = 0; ch < 3; ch++) {
+        const v = mask[i + ch] / 255;
+        for (const [k, a] of [[ch * 2, w(v, -1)], [ch * 2 + 1, w(v, 1)]]) if (a > 0) t = t.map((tv, j) => tv + (cols[k][j] - tv) * a);
+      }
+      px[i] *= t[0]; px[i + 1] *= t[1]; px[i + 2] *= t[2];
+      if (triple && triple[i + 2] / 255 < u.uHairCut.value) px[i + 3] = 0;
+    }
+    x.putImageData(d, 0, 0);
+  });
+}
+
 /** Plain glTF stand-ins for the shaders: the eye keeps its chosen iris and its shine, eyebrows and
  *  flat props go out unlit, everything else as a textured, fully rough surface. */
 function exportMaterial(m) {
-  const u = m.uniforms, main = u.uMain?.value || null, cut = u.uCutout?.value || 0;
+  const u = m.uniforms, cut = u.uCutout?.value || 0;
+  const masked = u.uHasMask?.value > 0.5 && u.uMain?.value?.image;
+  const main = masked ? bakeMask(u, u.uMain.value) : u.uMain?.value || null;
+  const hairCut = masked && u.uHairCut?.value > 0 ? 0.5 : 0;
   if (u.eyeCell) {
     const img = main.image, cw = img.width / 4, col = Math.round(u.eyeCell.value.x);
-    const iris = canvasTexture(main, (c, x) => { c.width = cw; c.height = img.height; x.drawImage(img, col * cw, 0, cw, img.height, 0, 0, cw, img.height); });
+    const iris = canvasTexture(main, (c, x) => { c.width = cw; c.height = img.height; x.drawImage(img, col * cw, 0, cw, img.height, 0, 0, cw, img.height); });   // main is already recoloured for background Umas
     const hi = [u.uHi0.value, u.uHi1.value].filter(t => t?.image?.width > 1);
     let shine = null;
     if (hi.length) {
@@ -1236,7 +1277,7 @@ function exportMaterial(m) {
     return new THREE.MeshStandardMaterial({ map: iris, emissive: new THREE.Color(k, k, k), emissiveMap: shine, roughness: 1, metalness: 0 });
   }
   if (!u.uToon) return new THREE.MeshBasicMaterial({ map: main, side: m.side, alphaTest: cut });
-  return new THREE.MeshStandardMaterial({ map: main, side: m.side, roughness: 1, metalness: 0, alphaTest: cut });
+  return new THREE.MeshStandardMaterial({ map: main, side: m.side, roughness: 1, metalness: 0, alphaTest: Math.max(cut, hairCut) });
 }
 
 async function bakeMotion(nodes) {

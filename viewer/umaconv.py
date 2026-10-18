@@ -222,10 +222,79 @@ def chara_id_from(names):
     return "0000"
 
 
+# --- background Umas -----------------------------------------------------------------------
+#
+# their head materials come without textures: the game picks them at runtime from the mob's face
+# and hair ids and skin tone. hair, eyebrows, eyes, tail and outfit are recoloured from an area
+# mask (_MaskColorTex) and six colours per part; the page does that (look.js), this hands it over.
+
+MOB_HEAD = "tex_chr0001_00_"
+
+
+def mob_textures(pack, info, mat_name, texs):
+    mob, skin = info["mob"], info["skin"]
+    face, hair = f"{MOB_HEAD}face{mob['face']:03d}", f"{MOB_HEAD}hair{mob['hair']:03d}"
+
+    def pick(*names):
+        return next((n for n in names if n in pack.textures), None)
+
+    def skinned(base, kind):
+        return pick(*(f"{base}_{s}_{kind}" for s in (skin, 0, 1, 2, 3)))
+
+    want = {}
+    if mat_name.endswith("_face"):
+        # the lashes are drawn white in the face texture and take the eyebrow colours
+        want = {"_MainTex": skinned(face, "diff"), "_ToonMap": skinned(face, "shad_c"),
+                "_TripleMaskMap": pick(f"{face}_0_base"), "_OptionMaskMap": pick(f"{face}_0_ctrl"),
+                "_MaskColorTex": pick(f"{face}_0_area")}
+    elif mat_name.endswith("_mayu"):
+        want = {"_MainTex": skinned(face, "diff"), "_MaskColorTex": pick(f"{face}_0_area")}
+    elif mat_name.endswith("_eye"):
+        want = {"_MainTex": pick(f"{face}_0_eye0"), "_High0Tex": pick(f"{face}_0_eyehi00"),
+                "_High1Tex": pick(f"{face}_0_eyehi01"), "_MaskColorTex": pick(f"{face}_0_eye0_area")}
+    elif mat_name.endswith("_cheek"):
+        want = {"_MainTex": skinned(face, "cheek0")}
+    elif mat_name.endswith("_hair"):
+        want = {"_MainTex": pick(f"{hair}_0_diff"), "_ToonMap": pick(f"{hair}_0_shad_c"),
+                "_TripleMaskMap": pick(f"{hair}_{mob.get('sex', 1)}_base", *(f"{hair}_{i}_base" for i in range(4))),
+                "_OptionMaskMap": pick(f"{hair}_0_ctrl"),
+                "_MaskColorTex": pick(f"{hair}_0_area")}
+    elif mat_name.startswith("mtl_bdy") and "_MaskColorTex" not in texs:
+        area = sorted(n for n in pack.textures if n.startswith(f"tex_bdy{info['body_type']:04d}_{info['body_sub']:02d}")
+                      and n.endswith("0_area"))
+        want = {"_MaskColorTex": area[0] if area else None}
+    return {k: v for k, v in want.items() if v}
+
+
+def mob_mask(info, mat_name):
+    """The six colours (R1 R2 G1 G2 B1 B2) and their shadow versions for one material, or None."""
+    mob = info["mob"]
+    hair, dress = mob.get("hair_colors", {}), mob.get("dress_colors", {})
+    part = next((p for p in ("hair", "mayu", "eye", "tail") if mat_name.endswith("_" + p) or f"mtl_{p}" in mat_name), None)
+    if mat_name.endswith("_face"):
+        part = "mayu"
+    if mat_name.startswith("mtl_bdy"):
+        src, lit, toon = dress, "color_", "toon_color_"
+    elif part:
+        src, lit, toon = hair, f"{part}_color_", f"{part}_toon_color_" if part != "eye" else f"{part}_color_"
+    else:
+        return None
+    six = lambda pre: [src.get(f"{pre}{c}{i}") or "#FFFFFF" for c in "rgb" for i in (1, 2)]
+    if not src:
+        return None
+    out = {"colors": six(lit), "toon": six(toon)}
+    if part == "hair":
+        # accessories (glasses...) sit lower in the base map's blue than the hair: the mob's cutoff
+        # decides which of them show
+        out["cutoff"] = mob.get("hair_cutoff", 0) / 10000
+    return out
+
+
 def convert_model(pack, out):
     roots = pack.roots()
     body = next((n for n in roots if n.startswith("pfb_bdy")), None)
-    head = next((n for n in roots if n.startswith("pfb_chr")), None)
+    heads = sorted(n for n in roots if n.startswith("pfb_chr"))   # background Umas: a face and a hair part
+    head = heads[0] if heads else None
     tail = next((n for n in roots if n.startswith("pfb_tail")), None)
     if not body:
         raise SystemExit("no body prefab in the pack")
@@ -234,7 +303,7 @@ def convert_model(pack, out):
     sk = Skeleton()
     root_reader, root_t = roots[body]
     root = sk.add_tree(root_reader, root_t, None)
-    for extra, attach in ((head, "Neck"), (tail, "Hip")):
+    for extra, attach in [(h, "Neck") for h in heads] + [(tail, "Hip")]:
         if not extra:
             continue
         _, t = roots[extra]
@@ -320,10 +389,17 @@ def write_model(pack, sk, root, out, chara):
                     if n:
                         texs[slot] = n
                         break
+        mask = None
+        if info.get("mob"):
+            texs.update(mob_textures(pack, info, m.m_Name, texs))
+            if "_MaskColorTex" in texs:
+                mask = mob_mask(info, m.m_Name)
         floats = {k: v for k, v in props.m_Floats if k in FLOAT_PARAMS}
         colors = {k: [c.r, c.g, c.b, c.a] for k, c in props.m_Colors if k in COLOR_PARAMS}
         mat = {"name": m.m_Name, "pbrMetallicRoughness": {"metallicFactor": 0, "roughnessFactor": 1},
                "extras": {"shader": shader_name, "textures": {}, "floats": floats, "colors": colors, "mesh": smr_name}}
+        if mask:
+            mat["extras"]["mask"] = mask
         for k, name in texs.items():
             idx = texture(name)
             if idx is not None:

@@ -41,6 +41,26 @@ void main() {
 
 // toon shading in the game's terms: _MainTex lit color, _ToonMap shadow color, and
 // _TripleMaskMap R (painted shadow tendency, 0 = always shaded) / G (specular mask).
+// background Umas: an area mask recolours grey textures. per channel, 0.5 keeps the texture;
+// towards 0 it tints with that channel's first colour, towards 1 with its second (R1 R2 G1 G2 B1
+// B2). the shadow side uses its own six.
+const MASK_GLSL = /* glsl */`
+uniform sampler2D uMask;
+uniform float uHasMask;
+uniform float uHairCut;
+uniform vec3 uMaskC[6];
+uniform vec3 uMaskT[6];
+float maskW(float v, float dir) { return clamp(((v - 0.5) * dir * 2.0 - 0.02) / 0.96, 0.0, 1.0); }
+vec3 maskTint(vec3 m, bool toon) {
+  vec3 t = vec3(1.0);
+  for (int i = 0; i < 3; i++) {
+    float v = i == 0 ? m.r : i == 1 ? m.g : m.b;
+    t = mix(t, toon ? uMaskT[i * 2] : uMaskC[i * 2], maskW(v, -1.0));
+    t = mix(t, toon ? uMaskT[i * 2 + 1] : uMaskC[i * 2 + 1], maskW(v, 1.0));
+  }
+  return t;
+}`;
+
 const TOON_FRAG = /* glsl */`
 uniform sampler2D uMain;
 uniform sampler2D uToon;
@@ -59,11 +79,18 @@ uniform float uCutout;
 varying vec2 vUv;
 varying vec3 vNormal;
 varying vec3 vViewPos;
+${MASK_GLSL}
 void main() {
   vec4 diff = texture2D(uMain, vUv);
   if (diff.a < uCutout) discard;
   vec3 shade = uHasToon > 0.5 ? texture2D(uToon, vUv).rgb : diff.rgb * vec3(0.78, 0.76, 0.88);
   vec4 tri = uHasTriple > 0.5 ? texture2D(uTriple, vUv) : vec4(1.0, 0.0, 1.0, 1.0);
+  if (uHasMask > 0.5) {
+    if (uHairCut > 0.0 && tri.b < uHairCut) discard;
+    vec3 m = texture2D(uMask, vUv).rgb;
+    diff.rgb *= maskTint(m, false);
+    shade *= maskTint(m, true);
+  }
   vec3 N = normalize(vNormal);
   if (!gl_FrontFacing) N = -N;
   vec3 V = normalize(vViewPos);
@@ -87,9 +114,11 @@ uniform sampler2D uMain;
 uniform float bright;
 uniform float uCutout;
 varying vec2 vUv;
+${MASK_GLSL}
 void main() {
   vec4 c = texture2D(uMain, vUv);
   if (c.a < uCutout) discard;
+  if (uHasMask > 0.5) c.rgb *= maskTint(texture2D(uMask, vUv).rgb, false);
   gl_FragColor = vec4(c.rgb * bright, 1.0);
 }`;
 
@@ -104,9 +133,11 @@ uniform float eyeHi;
 uniform float bright;
 varying vec2 vUv;
 varying vec2 vUv1;
+${MASK_GLSL}
 void main() {
   vec2 cuv = vec2((eyeCell.x + vUv.x) * 0.25, vUv.y);
   vec3 c = texture2D(uMain, cuv).rgb;
+  if (uHasMask > 0.5) c *= maskTint(texture2D(uMask, cuv).rgb, false);
   c += (texture2D(uHi0, vUv1).rgb + texture2D(uHi1, vUv1).rgb) * eyeHi;
   gl_FragColor = vec4(min(c, vec3(1.0)) * bright, 1.0);
 }`;
@@ -152,10 +183,16 @@ void main() {
 
 const OUTLINE_FRAG = /* glsl */`
 uniform sampler2D uMain;
+uniform sampler2D uTriple;
 uniform vec3 uLine;
 varying vec2 vUv;
+${MASK_GLSL}
 void main() {
   vec3 c = texture2D(uMain, vUv).rgb;
+  if (uHasMask > 0.5) {
+    if (uHairCut > 0.0 && texture2D(uTriple, vUv).b < uHairCut) discard;
+    c *= maskTint(texture2D(uMask, vUv).rgb, true);
+  }
   gl_FragColor = vec4(c * uLine, 1.0);
 }`;
 
@@ -180,9 +217,22 @@ function rgba(c, fallback) { return c ? new THREE.Vector4(c[0], c[1], c[2], c[3]
 
 /** opts (props): cutout = alpha below which pixels are dropped, side. Kind 'flat' draws
  *  the texture as is, without shading. */
+const hexVec = h => new THREE.Vector3(parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255);
+
+/** The recolour uniforms; inert for everything that has no mask. */
+function maskUniforms(ud, tex) {
+  const m = ud.mask, on = !!(m && tex._MaskColorTex);
+  return {
+    uMask: { value: on ? tex._MaskColorTex : WHITE }, uHasMask: { value: on ? 1 : 0 }, uHairCut: { value: on ? m.cutoff || 0 : 0 },
+    uMaskC: { value: on ? m.colors.map(hexVec) : Array.from({ length: 6 }, () => new THREE.Vector3(1, 1, 1)) },
+    uMaskT: { value: on ? m.toon.map(hexVec) : Array.from({ length: 6 }, () => new THREE.Vector3(1, 1, 1)) },
+  };
+}
+
 export function makeMaterial(kind, ud, tex, opts = {}) {
   const f = ud.floats || {}, c = ud.colors || {};
   const main = tex._MainTex || WHITE;
+  const mask = maskUniforms(ud, tex);
   const cutout = { value: opts.cutout ?? 0 };
   if (kind === 'cheek') {
     return new THREE.ShaderMaterial({
@@ -198,13 +248,13 @@ export function makeMaterial(kind, ud, tex, opts = {}) {
     return new THREE.ShaderMaterial({
       vertexShader: VERT, fragmentShader: EYE_FRAG,
       uniforms: { uMain: { value: main }, uHi0: { value: tex._High0Tex || BLACK }, uHi1: { value: tex._High1Tex || BLACK },
-                  eyeCell: U.eyeCell, eyeHi: U.eyeHi, bright: U.bright },
+                  eyeCell: U.eyeCell, eyeHi: U.eyeHi, bright: U.bright, ...mask },
     });
   }
   if (kind === 'mayu' || kind === 'flat') {
     return new THREE.ShaderMaterial({
       vertexShader: VERT, fragmentShader: UNLIT_FRAG,
-      uniforms: { uMain: { value: main }, bright: U.bright, uCutout: kind === 'mayu' ? { value: 0.5 } : cutout },
+      uniforms: { uMain: { value: main }, bright: U.bright, uCutout: kind === 'mayu' ? { value: 0.5 } : cutout, ...mask },
       side: opts.side ?? THREE.FrontSide,
     });
   }
@@ -218,7 +268,7 @@ export function makeMaterial(kind, ud, tex, opts = {}) {
       uFace: { value: kind === 'face' ? 1 : 0 },
       uRimColor: { value: rgba(c._RimColor, new THREE.Vector4(1, 1, 1, 0.3)) },
       uSpecColor: { value: new THREE.Vector3(...(c._SpecularColor || [1, 1, 1]).slice(0, 3)) },
-      uCutout: cutout,
+      uCutout: cutout, ...mask,
     },
     side: opts.side ?? (kind === 'hair' ? THREE.DoubleSide : THREE.FrontSide),
   });
@@ -231,6 +281,7 @@ export function makeOutline(ud, tex) {
     uniforms: {
       uMain: { value: tex._MainTex || WHITE }, uLine: { value: new THREE.Vector3(0.42, 0.36, 0.38) },
       outlineW: U.outlineW, uWidth: { value: (f._OutlineWidth ?? 0.325) / 0.325 },
+      uTriple: { value: tex._TripleMaskMap || WHITE }, ...maskUniforms(ud, tex),
     },
     side: THREE.BackSide, vertexColors: true,
   });

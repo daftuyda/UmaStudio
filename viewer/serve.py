@@ -112,6 +112,7 @@ def icon(chara_id, dress_id=None):
     if dress_id:
         candidates.append(f"chara/chr{chara_id:04d}/chr_icon_{chara_id:04d}_{dress_id:06d}_01")
     candidates.append(f"chara/chr{chara_id:04d}/chr_icon_{chara_id:04d}")
+    candidates += [f"mob/mob_chr_icon_{chara_id}_000001_01", f"mob/mob_chr_icon_{chara_id}"]
     import UnityPy
     for path in candidates:
         e = DATA.entries.get(path)
