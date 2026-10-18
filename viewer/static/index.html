@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>UmaStudio</title>
-<link rel="icon" href="data:,">
+<link rel="icon" href="/static/logo.png">
 <style>
 /* desktop tool in blender's manner: neutral greys, small dense widgets, one blue for
    selection, panels that fold, a docked timeline and a status bar */
@@ -96,7 +96,7 @@ label.check { display: flex; gap: 7px; align-items: center; min-height: var(--h)
 
 header { grid-column: 1 / 4; display: flex; align-items: center; gap: 8px; padding: 0 8px; background: var(--area); }
 .brand { display: flex; align-items: center; gap: 7px; font-weight: 600; color: #cfcfcf; margin-right: 6px; }
-.brand svg { width: 18px; height: 18px; }
+.brand img { width: 26px; height: 26px; }
 #umaBtn { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px 0 2px; background: var(--field); border: 1px solid var(--edge);
   border-radius: var(--r); cursor: pointer; text-align: left; min-width: 200px; }
 #umaBtn:hover { border-color: #555; }
@@ -263,7 +263,7 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
 <body>
 <header>
   <div class="brand">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4v7a6 6 0 0 0 12 0V4" fill="none" stroke="#4772b3" stroke-width="3.4" stroke-linecap="round"/></svg>
+    <img src="/static/logo.png" alt="">
     UmaStudio
   </div>
   <button id="umaBtn" title="Choose an Uma"><img id="umaImg" alt=""><div><b id="umaName">Choose an Uma</b><small id="umaOutfit">click to pick</small></div></button>
