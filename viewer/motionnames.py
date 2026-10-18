@@ -9,7 +9,7 @@ import os
 import re
 import sqlite3
 
-MASTER = os.path.join(os.path.expanduser("~"), "AppData", "LocalLow", "Cygames", "Umamusume", "master", "master.mdb")
+import gamepaths
 
 # not poses on their own: additive layers, hand grips, tail-only and helper clips
 NOT_POSES = re.compile(r"(_plus|_ik_add|_tail|_add|plusend)$|^anm_eve_type00_prop\d+")
@@ -88,7 +88,7 @@ def game_names():
     if _names is None:
         n = {"chara": {}, "card": {}, "song": {}, "command": {}, "training": {}}
         try:
-            db = sqlite3.connect(f"file:{MASTER}?mode=ro", uri=True)
+            db = sqlite3.connect(f"file:{gamepaths.master()}?mode=ro", uri=True)
             try:
                 for key, cat in (("chara", 6), ("card", 5), ("song", 16), ("command", 55)):
                     n[key] = dict(db.execute("SELECT [index], text FROM text_data WHERE category = ?", (cat,)))

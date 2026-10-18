@@ -3,7 +3,7 @@
 Needs the asset manifest (asset path -> file hash, per-file key, dependencies) and the
 bundle base key. Both are read from the installed game (offline.py); failing that, from
 the files the UmaStudio plugin writes on a game launch to %LOCALAPPDATA%\\UmaStudio
-(manifest.tsv, keys.json). Bundles in LocalLow/.../dat are XOR-encrypted after a plain
+(manifest.tsv, keys.json). Bundles in the game's dat folder (gamepaths) are XOR-encrypted after a plain
 256-byte header with an 88-byte stream built from the base key and the file's own key.
 """
 import json
@@ -15,9 +15,8 @@ import threading
 
 import numpy as np
 
-LOCALLOW = os.path.join(os.path.expanduser("~"), "AppData", "LocalLow", "Cygames", "Umamusume")
-DAT = os.path.join(LOCALLOW, "dat")
-MASTER = os.path.join(LOCALLOW, "master", "master.mdb")
+import gamepaths
+
 CONFIG = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "UmaStudio")
 HEADER = 256
 
@@ -56,7 +55,7 @@ class Entry:
 
     @property
     def file(self):
-        return os.path.join(DAT, self.hash[:2], self.hash)
+        return os.path.join(gamepaths.dat(), self.hash[:2], self.hash)
 
     @property
     def local(self):
@@ -112,10 +111,11 @@ class GameData:
 
     def _from_game(self):
         import offline
-        if not os.path.exists(offline.META):
+        meta = gamepaths.meta()
+        if not os.path.exists(meta):
             return False
-        st = os.stat(offline.META)
-        stamp = ("game", st.st_size, st.st_mtime_ns)
+        st = os.stat(meta)
+        stamp = ("game", meta, st.st_size, st.st_mtime_ns)
         if stamp == self._stamp:
             return True
         if stamp == self._failed:   # unchanged since it failed: don't redo the slow read
@@ -129,7 +129,7 @@ class GameData:
 
     def _load_game(self, offline, st, stamp):
         stamp_file = self.GAME_CACHE + ".stamp"
-        key = f"{st.st_size} {st.st_mtime_ns}"
+        key = f"{gamepaths.meta()} {st.st_size} {st.st_mtime_ns}"
         game = offline.game_folder()
         if not (os.path.exists(self.GAME_CACHE) and os.path.exists(stamp_file) and open(stamp_file).read() == key):
             os.makedirs(CONFIG, exist_ok=True)
@@ -227,7 +227,7 @@ class GameData:
     # --- characters --------------------------------------------------------------------
 
     def charas(self):
-        db = sqlite3.connect(f"file:{MASTER}?mode=ro", uri=True)
+        db = sqlite3.connect(f"file:{gamepaths.master()}?mode=ro", uri=True)
         try:
             names = dict(db.execute("SELECT [index], text FROM text_data WHERE category = 6"))
             dress_names = dict(db.execute("SELECT [index], text FROM text_data WHERE category = 14"))
@@ -258,7 +258,7 @@ class GameData:
     def mobs(self, dresses):
         """Background Umas: the generic head's face and hair parts, recoloured per mob, on the
         shared outfits. Height and shape are fixed for them, as in the game."""
-        db = sqlite3.connect(f"file:{MASTER}?mode=ro", uri=True)
+        db = sqlite3.connect(f"file:{gamepaths.master()}?mode=ro", uri=True)
         db.row_factory = sqlite3.Row
         try:
             names = dict(db.execute("SELECT [index], text FROM text_data WHERE category = 59"))
@@ -304,7 +304,7 @@ class GameData:
 
     def mini_faces(self):
         """Chibi expressions: per label, which tile each eyebrow, eye and the mouth show."""
-        db = sqlite3.connect(f"file:{MASTER}?mode=ro", uri=True)
+        db = sqlite3.connect(f"file:{gamepaths.master()}?mode=ro", uri=True)
         try:
             return [{"label": r[0], "brow_l": r[1], "brow_r": r[2], "eye_l": r[3], "eye_r": r[4], "mouth": r[5], "cheek": r[6]}
                     for r in db.execute("SELECT label, eyebrow_l, eyebrow_r, eye_l, eye_r, mouth, cheek FROM mini_face_type_data")]

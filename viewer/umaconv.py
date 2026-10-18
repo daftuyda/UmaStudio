@@ -727,8 +727,6 @@ MOUTH_TYPES = ("Base Normal CheekA_L CheekA_R WaraiA WaraiB WaraiC WaraiD WaraiE
                "TalkB_I_S TalkB_I_L TalkB_E_S TalkB_E_L RunA RunB DrivenA ToothHide TalkC_I TanA TanB TanC_L TanD_L "
                "TanC_R TanD_R Offset_U Offset_D Offset_L Offset_R Scale_U Scale_D LowAngle").split()
 
-MASTER_MDB = os.path.join(os.path.expanduser("~"), "AppData", "LocalLow", "Cygames", "Umamusume", "master", "master.mdb")
-
 
 def trs(t):
     p, r, sc = t["_position"], t["_rotation"], t["_scale"]
@@ -764,9 +762,10 @@ def convert_face(pack):
         face[part] = {"names": names[:len(entries)], "groups": groups}
 
     presets = []
-    if os.path.exists(MASTER_MDB):
+    import gamepaths
+    if os.path.exists(gamepaths.master()):
         import sqlite3
-        db = sqlite3.connect(f"file:{MASTER_MDB}?mode=ro", uri=True)
+        db = sqlite3.connect(f"file:{gamepaths.master()}?mode=ro", uri=True)
         for row in db.execute("SELECT label, eyebrow_l, eyebrow_r, eye_l, eye_r, mouth FROM face_type_data"):
             presets.append(dict(zip(("label", "eyebrow_l", "eyebrow_r", "eye_l", "eye_r", "mouth"), row)))
         db.close()

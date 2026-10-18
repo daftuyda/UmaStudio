@@ -60,7 +60,10 @@ async function start() {
   $('#boot').style.display = 'none';
   if (!s.ready) {
     $('#setup').style.display = 'flex';
-    $('#setupError').textContent = s.error || '';
+    if (!picking) $('#setupError').textContent = s.error || '';
+    $('#setupWhere').textContent = `Looked for the data in ${s.data}` + (s.game ? `, the game in ${s.game}` : ', the game was not found in Steam');
+    $('#gameBrowse').style.display = s.browse ? '' : 'none';
+    if (s.picked && !$('#gamePath').value) $('#gamePath').value = s.picked;
     $('#status').textContent = 'setup needed';
     setTimeout(() => start().catch(() => {}), 3000);
     return;
@@ -73,6 +76,27 @@ async function start() {
   if (c) await chooseUma(c, last && last.chara === c.id ? last.dress : null);
   else openPicker();
 }
+
+// game files not found: the user points at the install or data folder by hand
+let picking = false;   // keeps the answer to a pick on screen until the next status check
+async function useGamePath(path) {
+  if (!path) return;
+  $('#gamePath').value = path;
+  picking = true;
+  try {
+    await post('/api/game/path', { path }, null);
+    $('#setupError').textContent = 'Reading the game files…';
+  } catch (e) {
+    $('#setupError').textContent = e.message;
+  }
+  setTimeout(() => { picking = false; }, 4000);
+}
+$('#gameUse').onclick = () => useGamePath($('#gamePath').value.trim());
+$('#gamePath').onkeydown = e => { if (e.key === 'Enter') $('#gameUse').click(); };
+$('#gameBrowse').onclick = async () => {
+  const r = await post('/api/game/browse', {}, null).catch(e => toast(e.message, true));
+  if (r?.path) await useGamePath(r.path);
+};
 
 function openPicker() {
   $('#picker').style.display = 'block';

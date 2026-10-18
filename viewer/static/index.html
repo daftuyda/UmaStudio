@@ -254,7 +254,10 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
 #boot { display: flex; position: absolute; inset: 0; align-items: center; justify-content: center; z-index: 6; background: rgba(30,30,30,.94); }
 #boot > div { width: 300px; display: flex; flex-direction: column; gap: 8px; background: var(--panel); border: 1px solid #111; border-radius: 6px; padding: 16px 18px; }
 #boot progress { width: 100%; accent-color: var(--sel); }
-#setup div { max-width: 440px; background: var(--panel); border: 1px solid #111; border-radius: 6px; padding: 18px 20px; line-height: 1.6; }
+#setup > div { max-width: 480px; background: var(--panel); border: 1px solid #111; border-radius: 6px; padding: 18px 20px; line-height: 1.6; }
+#setup .pick { display: flex; gap: 6px; margin: 10px 0 6px; }
+#setup .pick input { flex: 1; }
+#setup .where { word-break: break-all; }
 </style>
 <script type="importmap">
 { "imports": { "three": "/static/vendor/three.module.js", "three/addons/": "/static/vendor/addons/" } }
@@ -306,7 +309,15 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
       <b>Game files not found</b><br>
       UmaStudio reads the installed game's files. Check that Uma Musume is installed through Steam and has
       downloaded its data (start it once).
-      <br><br><span class="hint" id="setupError"></span>
+      <br><br>Or show UmaStudio where it is: the game's install folder (<b>UmamusumePrettyDerby</b>) or its data
+      folder, the one with a file called <b>meta</b>.
+      <div class="pick">
+        <input class="field" type="text" id="gamePath" placeholder="...\steamapps\common\UmamusumePrettyDerby" spellcheck="false">
+        <button class="b" id="gameBrowse">Browse…</button>
+        <button class="b" id="gameUse">Use</button>
+      </div>
+      <span class="hint" id="setupError"></span>
+      <br><span class="hint where" id="setupWhere"></span>
       <br><span class="hint">This continues by itself once the files can be read.</span>
     </div></div>
   </div>

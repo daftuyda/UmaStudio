@@ -18,16 +18,15 @@ import ctypes
 import os
 import struct
 
-LOCALLOW = os.path.join(os.path.expanduser("~"), "AppData", "LocalLow", "Cygames", "Umamusume")
-META = os.path.join(LOCALLOW, "meta")
-DATA_DIR = "UmamusumePrettyDerby_Data"
+import gamepaths
+
+DATA_DIR = gamepaths.DATA_DIR
 
 
 def game_folder():
-    import cyspring
-    game = cyspring.find_game()
+    game = gamepaths.game()
     if not game:
-        raise RuntimeError("the game was not found in Steam's libraries")
+        raise RuntimeError("the game was not found in Steam's libraries, pick its folder by hand")
     return game
 
 
@@ -100,7 +99,7 @@ def manifest_rows(game, progress=None):
     # (26 = not a database: wrong key or cipher).
     for param in (b"cipher", b"default:cipher"):
         db, stmt = vp(), vp()
-        rc_open = lib.sqlite3_open_v2(META.encode("utf-8"), ctypes.byref(db), 1, None)   # SQLITE_OPEN_READONLY
+        rc_open = lib.sqlite3_open_v2(gamepaths.meta().encode("utf-8"), ctypes.byref(db), 1, None)   # SQLITE_OPEN_READONLY
         try:
             rc_cipher = lib.sqlite3mc_config(db, param, cipher) if cipher else 0
             rc_key = lib.sqlite3_key(db, key, len(key))

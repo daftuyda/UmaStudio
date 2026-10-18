@@ -14,7 +14,6 @@ import array
 import ctypes
 import math
 import os
-import re
 import struct
 
 # NativeClothWorking (0x168 bytes)
@@ -47,29 +46,10 @@ _dll = None
 
 
 def find_game():
-    """The game's install folder, from Steam's library list."""
-    import winreg
-    roots = []
-    for hive, key, value in ((winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
-                             (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath")):
-        try:
-            with winreg.OpenKey(hive, key) as k:
-                roots.append(winreg.QueryValueEx(k, value)[0])
-        except OSError:
-            pass
-    libraries = []
-    for steam in roots:
-        libraries.append(steam)
-        try:
-            text = open(os.path.join(steam, "steamapps", "libraryfolders.vdf"), encoding="utf-8").read()
-        except OSError:
-            continue
-        libraries += [m.replace("\\\\", "\\") for m in re.findall(r'"path"\s+"([^"]+)"', text)]
-    for lib in libraries:
-        game = os.path.join(lib, "steamapps", "common", "UmamusumePrettyDerby")
-        if os.path.exists(os.path.join(game, DLL)):
-            return game
-    return None
+    """The game's install folder (Steam's library list, or the folder the user picked)."""
+    import gamepaths
+    game = gamepaths.game()
+    return game if game and os.path.exists(os.path.join(game, DLL)) else None
 
 
 def plugin():

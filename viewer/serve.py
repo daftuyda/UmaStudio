@@ -30,11 +30,12 @@ from urllib.parse import parse_qs, unquote, urlparse
 # frozen (UmaStudio.exe): the scripts and static/ are unpacked under _MEIPASS
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import gamepaths  # noqa: E402
 # loaded by boot() once the window is up. they pull in UnityPy and numpy, which take a couple
 # of seconds.
 cyspring = motionnames = offline = story = umaconv = umadata = None
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 PORT = 27620
 CONFIG = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "UmaStudio")   # = umadata.CONFIG
 ROOT = os.path.join(os.path.expanduser("~"), "Pictures", "UmaStudio")
@@ -53,7 +54,7 @@ CONVERTER_VERSION = "10"
 PROP_VERSION = "1"
 IMAGE_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp", "gif": "image/gif"}
 SETUP = ("UmaStudio could not read the installed game's files. Check that Uma Musume is installed "
-         "through Steam and has downloaded its data (start it once).")
+         "through Steam and has downloaded its data (start it once), or pick the game's folder.")
 
 DATA = None
 _lock = threading.Lock()
@@ -61,6 +62,7 @@ _prop_lock = threading.Lock()
 _charas = {"stamp": None, "list": None}
 _boot = {"stage": "Starting", "progress": 0.0, "done": False, "error": None}
 _booted = threading.Event()
+_window = []   # the app window once it is open, for the folder picker
 
 
 def boot():
@@ -656,6 +658,16 @@ def watchdog():
             os._exit(0)
 
 
+def browse_folder():
+    """Windows' folder picker in the app window; None when cancelled or not in the app."""
+    if not _window:
+        return None
+    import webview
+    kind = webview.FileDialog.FOLDER if hasattr(webview, "FileDialog") else webview.FOLDER_DIALOG
+    got = _window[0].create_file_dialog(kind)
+    return got[0] if got else None
+
+
 def native_window(url):
     """A real window (Edge WebView2, part of Windows 11) when pywebview is available.
     Blocks until the window is closed; False when it could not be shown."""
@@ -664,8 +676,8 @@ def native_window(url):
     except ImportError:
         return False
     try:
-        webview.create_window("UmaStudio", url, width=1600, height=950, min_size=(1000, 640),
-                              background_color="#0e1014", text_select=False)
+        _window.append(webview.create_window("UmaStudio", url, width=1600, height=950, min_size=(1000, 640),
+                              background_color="#0e1014", text_select=False))
         webview.start(gui="edgechromium", private_mode=False,
                       storage_path=os.path.join(CONFIG, "webview"))
         return True
@@ -741,9 +753,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not _boot["done"]:
                     return self._send(200, {"ready": False, "loading": True, "stage": _boot["stage"],
                                             "progress": round(_boot["progress"], 3), "version": VERSION})
-                return self._send(200, {"ready": DATA is not None and DATA.ready(), "setup": SETUP, "version": VERSION,
+                ready = DATA is not None and DATA.ready()
+                game, data = gamepaths.paths()
+                return self._send(200, {"ready": ready, "setup": SETUP, "version": VERSION,
                                         "error": (DATA.error if DATA else None) or _boot["error"],
-                                        "recent": recent()})
+                                        "game": game, "data": data, "picked": gamepaths.picked(),
+                                        "browse": bool(_window), "recent": recent()})
             if p == "/api/charas":
                 return self._send(200, {"ok": True, "charas": charas()})
             m = re.match(r"^/api/icon/(\d+)(?:_(\d+))?$", p)
@@ -842,6 +857,14 @@ class Handler(BaseHTTPRequestHandler):
                 with open(os.path.join(PROP_THUMBS, name + ".png"), "wb") as f:
                     f.write(base64.b64decode(body.get("png", "").split(",", 1)[-1]))
                 return self._send(200, {"ok": True})
+            if self.path == "/api/game/path":
+                try:
+                    game, data = gamepaths.pick(body.get("path", ""))
+                except ValueError as e:
+                    return self._send(400, {"ok": False, "error": str(e)})
+                return self._send(200, {"ok": True, "game": game, "data": data})
+            if self.path == "/api/game/browse":
+                return self._send(200, {"ok": True, "path": browse_folder()})
             if self.path == "/api/open":
                 target = {"renders": RENDERS, "images": IMAGES}.get(body.get("what"), ROOT)
                 os.makedirs(target, exist_ok=True)
