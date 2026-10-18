@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { GameSprings, TICK } from '/static/physics.js';
 import { U, kindOf, makeMaterial, makeOutline } from '/static/look.js';
 import { $, $$, call, post, getJson, toast, radio, store, busy, initChrome } from '/static/ui.js';
@@ -1190,6 +1191,139 @@ async function recordVideo() {
 $('#record').onclick = () => recordVideo().catch(e => toast(e.message, true));
 $('#recCancel').onclick = () => { if (recording) recording.cancel = true; };
 
+// --- model export ------------------------------------------------------------------------------
+//
+// her and her props as one .glb for blender. the toon shaders don't exist in glTF, so every mesh
+// goes out with a plain textured material; outlines and the multiplied blush stay behind.
+// "with the motion" bakes what the view shows, frame by frame, into one animation: the clip, face,
+// physics, head turn and props, the same steps a video recording takes.
+
+const EXPORT_FPS = 30;
+
+/** A canvas copy of (part of) a texture's image, same orientation as the source. */
+function canvasTexture(src, draw) {
+  const c = document.createElement('canvas');
+  draw(c, c.getContext('2d'));
+  const t = new THREE.CanvasTexture(c);
+  t.flipY = src.flipY;
+  t.colorSpace = src.colorSpace;
+  return t;
+}
+
+/** Plain glTF stand-ins for the shaders: the eye keeps its chosen iris and its shine, eyebrows and
+ *  flat props go out unlit, everything else as a textured, fully rough surface. */
+function exportMaterial(m) {
+  const u = m.uniforms, main = u.uMain?.value || null, cut = u.uCutout?.value || 0;
+  if (u.eyeCell) {
+    const img = main.image, cw = img.width / 4, col = Math.round(u.eyeCell.value.x);
+    const iris = canvasTexture(main, (c, x) => { c.width = cw; c.height = img.height; x.drawImage(img, col * cw, 0, cw, img.height, 0, 0, cw, img.height); });
+    const hi = [u.uHi0.value, u.uHi1.value].filter(t => t?.image?.width > 1);
+    let shine = null;
+    if (hi.length) {
+      shine = canvasTexture(hi[0], (c, x) => {
+        c.width = hi[0].image.width; c.height = hi[0].image.height;
+        x.globalCompositeOperation = 'lighter';
+        hi.forEach(t => x.drawImage(t.image, 0, 0, c.width, c.height));
+      });
+      shine.channel = 1;
+    }
+    const k = u.eyeHi.value;
+    return new THREE.MeshStandardMaterial({ map: iris, emissive: new THREE.Color(k, k, k), emissiveMap: shine, roughness: 1, metalness: 0 });
+  }
+  if (!u.uToon) return new THREE.MeshBasicMaterial({ map: main, side: m.side, alphaTest: cut });
+  return new THREE.MeshStandardMaterial({ map: main, side: m.side, roughness: 1, metalness: 0, alphaTest: cut });
+}
+
+async function bakeMotion(nodes) {
+  const clip = current.action.getClip();
+  const frames = Math.max(2, Math.round(clip.duration * EXPORT_FPS));
+  const step = 1 / EXPORT_FPS;
+  const keys = nodes.map(() => ({ p: [], q: [], s: [] }));
+  const springs = current.springs?.enabled ? current.springs : null;
+  const poseAt = t => { current.action.time = t % clip.duration; current.mixer.update(0); applyProcess(); applyFace(); };
+  let ticks = 0;
+  if (springs) { springs.reset(); poseAt(0); await springs.step(); }
+  for (let i = 0; i < frames; i++) {
+    if (springs) {
+      const target = Math.round(i * step / TICK);
+      while (ticks < target) { ticks++; poseAt(ticks * TICK); await springs.step(); }
+    } else poseAt(i * step);
+    current.root.updateMatrixWorld(true);
+    applyHeadTurn(i === 0 ? 0 : step);
+    applyEyeTrace(i === 0 ? 0 : step);
+    props.updateProps();
+    nodes.forEach((n, k) => { keys[k].p.push(...n.position.toArray()); keys[k].q.push(...n.quaternion.toArray()); keys[k].s.push(...n.scale.toArray()); });
+  }
+  const times = Float32Array.from({ length: frames }, (_, i) => i * step);
+  const moves = v => v.some((x, i) => Math.abs(x - v[i % (v.length / frames)]) > 1e-5);
+  const tracks = [];
+  nodes.forEach((n, k) => {
+    if (moves(keys[k].p)) tracks.push(new THREE.VectorKeyframeTrack(`${n.name}.position`, times, keys[k].p));
+    if (moves(keys[k].q)) tracks.push(new THREE.QuaternionKeyframeTrack(`${n.name}.quaternion`, times, keys[k].q));
+    if (moves(keys[k].s)) tracks.push(new THREE.VectorKeyframeTrack(`${n.name}.scale`, times, keys[k].s));
+  });
+  return new THREE.AnimationClip(poseTitle.replace(`${current.name} · `, '') || 'motion', frames * step, tracks);
+}
+
+async function exportModel() {
+  if (!current) return openPicker();
+  const withMotion = $('#expMotion').checked && !!current.action;
+  const wasPlaying = playing;
+  setPlaying(false);
+  recording = { cancel: false };
+  const keepTime = current.action ? current.action.time : 0;
+  const undo = [];
+  const info = props.exportInfo();
+  const out = new THREE.Group();
+  out.name = 'UmaStudio';
+  try {
+    // plain materials, no outlines or blush, a unique name on everything that moves
+    const hidden = new Set([...current.outlines, ...info.props.flatMap(p => p.outlines)]);
+    const nodes = [];
+    let n = 0;
+    for (const root of [current.root, info.group]) {
+      root.traverse(o => {
+        if (o.isMesh) {
+          if (hidden.has(o) || o.material?.blending === THREE.CustomBlending) {
+            const v = o.visible; o.visible = false; undo.push(() => { o.visible = v; });
+          } else if (o.material?.uniforms) {
+            const m = o.material;
+            o.material = exportMaterial(m);
+            undo.push(() => { o.material.map?.isCanvasTexture && o.material.map.dispose(); o.material.dispose(); o.material = m; });
+            // the game's vertex colors are shading data, glTF would multiply them into the texture
+            const col = o.geometry.getAttribute('color');
+            if (col) { o.geometry.deleteAttribute('color'); undo.push(() => o.geometry.setAttribute('color', col)); }
+          }
+          return;
+        }
+        if (!o.name || nodes.some(x => x.name === o.name)) {
+          const name = o.name; o.name = `${name || 'node'}_${++n}`; undo.push(() => { o.name = name; });
+        }
+        nodes.push(o);
+      });
+    }
+    const clip = withMotion ? await busy('Baking the motion…', bakeMotion(nodes)) : null;
+    if (current.action) { current.action.time = keepTime; current.mixer.update(0); applyProcess(); applyFace(); }
+    props.updateProps();
+    const parents = [current.root.parent, info.group.parent];
+    out.add(current.root, info.group);
+    let glb;
+    try {
+      glb = await busy('Writing the model…', new GLTFExporter().parseAsync(out, { binary: true, onlyVisible: true, animations: clip ? [clip] : [] }));
+    } finally {
+      parents[0].add(current.root);
+      parents[1].add(info.group);
+    }
+    await call(`/api/export?name=${encodeURIComponent(fileName())}`, { method: 'POST', headers: { 'X-Studio': '1' }, body: glb }, 'Saving the model…');
+    toast(`Saved model${clip ? ' with the motion' : ''} (${(glb.byteLength / 1048576).toFixed(1)} MB)`, false, ['Show', openSaved]);
+  } finally {
+    undo.reverse().forEach(f => f());
+    recording = null;
+    setPlaying(wasPlaying);
+  }
+}
+$('#exportModel').onclick = () => exportModel().catch(e => toast(e.message, true));
+
 // --- loop ----------------------------------------------------------------------------------------
 
 const clock = new THREE.Clock();
@@ -1255,7 +1389,7 @@ async function followWarmUp() {
 props.initProps({ scene, camera, renderer, controls, canvas, current: () => current, libraryClip,
                   idle: () => !!current && !recording && !pointerHeld });
 
-window.studio = { scene, camera, controls, setCamera, setFace, savePNG, recordVideo, chooseUma, get charas() { return charas; },
+window.studio = { scene, camera, controls, setCamera, setFace, savePNG, recordVideo, exportModel, chooseUma, get charas() { return charas; },
                   get current() { return current; }, video, shot, props: props.propsDebug, bgPic,
                   // for scripted shots: pause the live loop and pose / render frames by hand
                   script: { renderFrame, libraryClip, ownClip, applyFace, applyProcess, faceState, updateProps: props.updateProps, TICK,

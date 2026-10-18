@@ -461,6 +461,14 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
           <button class="b" id="openRenders">Open saved files</button>
         </div>
       </details>
+      <details class="panel" id="pnlModel" open>
+        <summary>Model</summary>
+        <div class="body">
+          <label class="check" title="Bakes everything that moves (motion, face, physics, props) into one animation"><input type="checkbox" id="expMotion" checked> With the motion</label>
+          <button class="big" id="exportModel">Export for Blender (.glb)</button>
+          <div class="hint">Her mesh, skeleton and textures plus her props, in the current pose or with the motion baked in. Blender: File, Import, glTF.</div>
+        </div>
+      </details>
     </div>
 
     <div class="page" data-tab="look" hidden>

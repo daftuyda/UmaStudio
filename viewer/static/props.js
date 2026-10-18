@@ -743,4 +743,7 @@ export async function warmThumbs(report) {
   }
 }
 
+/** For the model export: the group every prop hangs from, and each prop's outline meshes. */
+export function exportInfo() { return { group, props: list.map(p => ({ uid: p.uid, anchor: p.anchorObj, outlines: p.outlines })) }; }
+
 export const propsDebug = { list, get selected() { return selected; }, add, remove, select };

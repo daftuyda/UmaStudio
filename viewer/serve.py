@@ -601,6 +601,17 @@ def video_finish(vid, cancel=False):
     return v["path"]
 
 
+def export_save(name, data):
+    """A model the page exported (.glb), saved with the renders."""
+    if data[:4] != b"glTF":
+        raise ValueError("not a glb file")
+    os.makedirs(RENDERS, exist_ok=True)
+    path = unique(os.path.join(RENDERS, re.sub(r"[^\w\-. ]", "_", name)[:120] + ".glb"))
+    with open(path, "wb") as f:
+        f.write(data)
+    return path
+
+
 # --- app window ------------------------------------------------------------------------------
 
 _last_ping = [time.time()]
@@ -777,6 +788,9 @@ class Handler(BaseHTTPRequestHandler):
                 if sid not in _springs:
                     return self._send(410, {"error": "simulation gone"})
                 return self._send(200, spring_step(sid, raw), "application/octet-stream")
+            if self.path.startswith("/api/export"):
+                name = parse_qs(urlparse(self.path).query).get("name", ["model"])[0]
+                return self._send(200, {"ok": True, "path": export_save(name, raw)})
             if self.path.startswith("/api/images/upload"):
                 name = parse_qs(urlparse(self.path).query).get("name", ["image"])[0]
                 return self._send(200, {"ok": True, "file": image_save(name, raw)})
