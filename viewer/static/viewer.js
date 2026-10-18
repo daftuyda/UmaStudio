@@ -967,16 +967,37 @@ function updateGuide() {
   Object.assign(g.style, { display: 'block', left: r.x + 'px', top: r.y + 'px', width: r.w + 'px', height: r.h + 'px' });
 }
 $('#guide').onchange = updateGuide;
+// a preset, or your own width x height (kept even, codecs want that)
+const PRESETS = [...$$('#sizes .chip')].map(b => b.dataset.size).filter(s => s !== 'custom');
+function useSize(size, custom) {
+  shot.size = size;
+  store.set('size', size);
+  radio('#sizes .chip', $(`#sizes .chip[data-size="${custom ? 'custom' : size}"]`));
+  $('#customSize').style.display = custom ? 'flex' : 'none';
+  updateGuide();
+  setCamera(shot.cam);
+}
+function customSize() {
+  const fit = v => Math.max(16, Math.min(8192, Math.round((+v || 16) / 2) * 2));
+  const w = fit($('#sizeW').value), h = fit($('#sizeH').value);
+  $('#sizeW').value = w; $('#sizeH').value = h;
+  store.set('customSize', `${w}x${h}`);
+  return `${w}x${h}`;
+}
 $$('#sizes .chip').forEach(b => {
   b.onclick = () => {
-    shot.size = b.dataset.size;
-    store.set('size', shot.size);
-    radio('#sizes .chip', b);
-    updateGuide();
-    setCamera(shot.cam);
+    if (b.dataset.size !== 'custom') return useSize(b.dataset.size, false);
+    useSize(customSize(), true);
   };
 });
-radio('#sizes .chip', $(`#sizes .chip[data-size="${shot.size}"]`));
+$('#sizeW').onchange = $('#sizeH').onchange = () => useSize(customSize(), true);
+{
+  const [w, h] = store.get('customSize', shot.size).split('x');
+  $('#sizeW').value = w; $('#sizeH').value = h;
+  const custom = !PRESETS.includes(shot.size);
+  radio('#sizes .chip', $(`#sizes .chip[data-size="${custom ? 'custom' : shot.size}"]`));
+  $('#customSize').style.display = custom ? 'flex' : 'none';
+}
 
 // --- rendering frames ----------------------------------------------------------------------------
 
@@ -1152,7 +1173,7 @@ async function recordVideo() {
     }
     $('#recText').textContent = 'encoding…';
     await post('/api/video/finish', { id });
-    toast(`Saved ${seconds.toFixed(1)} s ${video.fmt.toUpperCase()} video`, false, ['Show', openSaved]);
+    toast(video.fmt === 'png' ? `Saved ${frames} PNG frames` : `Saved ${seconds.toFixed(1)} s ${video.fmt.toUpperCase()} video`, false, ['Show', openSaved]);
   } catch (e) {
     await post('/api/video/finish', { id, cancel: true }).catch(() => {});
     if (e.message !== 'cancelled') toast(e.message, true);

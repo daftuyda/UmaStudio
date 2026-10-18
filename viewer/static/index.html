@@ -63,6 +63,9 @@ input[type=search] { width: 100%; padding: 0 8px 0 24px;
   background: var(--field) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='11' fill='none' stroke='%239c9c9c' stroke-width='1.5'%3E%3Ccircle cx='4.5' cy='4.5' r='3.6'/%3E%3Cpath d='M7.2 7.2l3.3 3.3'/%3E%3C/svg%3E") no-repeat 8px center; }
 input[type=search]:focus, select:focus { border-color: var(--sel); }
 input[type=color] { width: 100%; padding: 2px; cursor: pointer; }
+input.field[type=number] { height: var(--h); min-width: 0; padding: 0 7px; background: var(--field); border: 1px solid var(--edge); border-radius: var(--r); outline: none; }
+input.field[type=number]:focus { border-color: var(--sel); }
+#vidFmt .chip:last-child { grid-column: span 2; }
 
 input[type=checkbox] { appearance: none; flex: none; width: 14px; height: 14px; margin: 0; border-radius: 3px; background: var(--widget);
   border: 1px solid var(--edge); display: inline-grid; place-content: center; cursor: pointer; }
@@ -422,6 +425,12 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
             <button class="chip" data-size="3840x2160" title="3840 × 2160">4K</button>
             <button class="chip" data-size="2048x2048" title="2048 × 2048">Square</button>
             <button class="chip" data-size="1080x1920" title="1080 × 1920">Vertical</button>
+            <button class="chip" data-size="custom" title="Your own width and height">Custom</button>
+          </div>
+          <div class="line" id="customSize" style="display:none">
+            <input type="number" id="sizeW" class="field grow" min="16" max="8192" step="2" title="Width in pixels">
+            <span class="hint">×</span>
+            <input type="number" id="sizeH" class="field grow" min="16" max="8192" step="2" title="Height in pixels">
           </div>
           <label class="check"><input type="checkbox" id="ssaa" checked> Smoother edges</label>
           <label class="check"><input type="checkbox" id="crop"> Crop to the character</label>
@@ -441,7 +450,8 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
             <button class="chip on" data-fmt="mp4" title="Plays everywhere. Uses your background (black if transparent).">MP4</button>
             <button class="chip" data-fmt="webm" title="Transparent background, for OBS and browsers">WebM (transparent)</button>
             <button class="chip" data-fmt="mov" title="Transparent ProRes 4444, for Premiere, DaVinci, After Effects">MOV (editing)</button>
-            <button class="chip" data-fmt="gif">GIF</button>
+            <button class="chip" data-fmt="gif" title="Keeps a transparent background">GIF</button>
+            <button class="chip" data-fmt="png" title="Numbered PNGs in a folder, transparent, no ffmpeg needed">PNG frames</button>
           </div>
           <div class="seg" id="vidFps">
             <button class="chip" data-fps="30">30 fps</button>

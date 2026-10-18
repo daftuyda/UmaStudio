@@ -534,18 +534,25 @@ def find_ffmpeg():
 
 
 def video_start(w, h, fps, fmt, name):
+    os.makedirs(RENDERS, exist_ok=True)
+    safe = re.sub(r"[^\w\-. ]", "_", name)[:120]
+    vid = uuid.uuid4().hex
+    if fmt == "png":
+        # frames as numbered PNGs in their own folder, no ffmpeg involved
+        folder = unique(os.path.join(RENDERS, safe))
+        os.makedirs(folder)
+        _videos[vid] = {"dir": folder, "w": w, "h": h, "n": 0, "size": w * h * 4}
+        return vid
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         raise RuntimeError("ffmpeg is needed for video: run  winget install ffmpeg  and restart UmaStudio")
     ext, args = FORMATS[fmt]
-    os.makedirs(RENDERS, exist_ok=True)
-    path = unique(os.path.join(RENDERS, re.sub(r"[^\w\-. ]", "_", name)[:120] + "." + ext))
+    path = unique(os.path.join(RENDERS, safe + "." + ext))
     log = open(os.path.join(CACHE, "ffmpeg.log"), "wb")
     proc = subprocess.Popen([ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba",
                              "-s", f"{w}x{h}", "-r", str(fps), "-i", "-", *args, path],
                             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log,
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    vid = uuid.uuid4().hex
     _videos[vid] = {"proc": proc, "path": path, "size": w * h * 4, "log": log}
     return vid
 
@@ -554,11 +561,22 @@ def video_frame(vid, data):
     v = _videos[vid]
     if len(data) != v["size"]:
         raise ValueError("frame has the wrong size")
+    if "dir" in v:
+        from PIL import Image
+        v["n"] += 1
+        Image.frombuffer("RGBA", (v["w"], v["h"]), data, "raw", "RGBA", 0, 1).save(
+            os.path.join(v["dir"], f"{os.path.basename(v['dir'])} {v['n']:04d}.png"), compress_level=3)
+        return
     v["proc"].stdin.write(data)
 
 
 def video_finish(vid, cancel=False):
     v = _videos.pop(vid)
+    if "dir" in v:
+        if cancel:
+            shutil.rmtree(v["dir"], ignore_errors=True)
+            return None
+        return v["dir"]
     proc = v["proc"]
     _encoding[0] += 1
     try:
