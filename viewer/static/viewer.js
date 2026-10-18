@@ -7,6 +7,7 @@ import { U, kindOf, makeMaterial, makeOutline } from '/static/look.js';
 import { $, $$, call, post, getJson, toast, radio, store, busy, initChrome } from '/static/ui.js';
 import { pickImage, pictureName } from '/static/images.js';
 import * as props from '/static/props.js';
+import * as pose from '/static/pose.js';
 
 // --- renderer -----------------------------------------------------------------
 
@@ -200,6 +201,7 @@ async function loadModel(pack, manifest, sets, chara, dress) {
   follow.root = null;
   current.mixer.timeScale = parseFloat($('#speed').value);
   props.onModel(current);
+  pose.onModel(current);
   if (manifest.physics) {
     // set up while every bone is at rest, like the game binds its springs
     const mine = current;
@@ -714,6 +716,7 @@ function unityAngle(e) {
 }
 
 function applyProcess() {
+  pose.applyEdits();   // hand-made joint changes first: the helper bones follow the final angles
   if (!current?.process) return;
   for (const [obj, list] of current.process) {
     const sum = { position: null, rotation: null, scale: null };
@@ -1015,11 +1018,13 @@ function renderFrame(w, h, ss = 1) {
   const bg = background();
   placeBg(true);
   props.gizmo(false);
+  pose.gizmo(false);
   renderer.setRenderTarget(rt);
   renderer.setClearColor(bg && bg !== 'picture' ? new THREE.Color(bg) : 0x000000, bg ? 1 : 0);
   renderer.clear(true, true, true);
   renderer.render(scene, camera);
   props.gizmo(true);
+  pose.gizmo(true);
   const px = new Uint8Array(RW * RH * 4);
   renderer.readRenderTargetPixels(rt, 0, 0, RW, RH, px);
   renderer.setRenderTarget(null);
@@ -1330,6 +1335,7 @@ const clock = new THREE.Clock();
 let stepping = false;   // a physics step is out: this frame is drawn once it is back
 function draw() {
   props.updateProps();
+  pose.updateDots();
   updateLight();
   placeBg(false);
   renderer.render(scene, camera);
@@ -1386,11 +1392,12 @@ async function followWarmUp() {
   $('#warm').textContent = '';
 }
 
+pose.initPose({ scene, camera, canvas, controls, onPick: () => props.propsDebug.select(null) });
 props.initProps({ scene, camera, renderer, controls, canvas, current: () => current, libraryClip,
                   idle: () => !!current && !recording && !pointerHeld });
 
 window.studio = { scene, camera, controls, setCamera, setFace, savePNG, recordVideo, exportModel, chooseUma, get charas() { return charas; },
-                  get current() { return current; }, video, shot, props: props.propsDebug, bgPic,
+                  get current() { return current; }, video, shot, props: props.propsDebug, pose: pose.poseDebug, bgPic,
                   // for scripted shots: pause the live loop and pose / render frames by hand
                   script: { renderFrame, libraryClip, ownClip, applyFace, applyProcess, faceState, updateProps: props.updateProps, TICK,
                             freeze(on) { recording = on ? { cancel: false } : null; } } };

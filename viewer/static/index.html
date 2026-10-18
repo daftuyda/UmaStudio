@@ -63,6 +63,8 @@ input[type=search] { width: 100%; padding: 0 8px 0 24px;
   background: var(--field) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='11' fill='none' stroke='%239c9c9c' stroke-width='1.5'%3E%3Ccircle cx='4.5' cy='4.5' r='3.6'/%3E%3Cpath d='M7.2 7.2l3.3 3.3'/%3E%3C/svg%3E") no-repeat 8px center; }
 input[type=search]:focus, select:focus { border-color: var(--sel); }
 input[type=color] { width: 100%; padding: 2px; cursor: pointer; }
+input.field[type=text] { height: var(--h); min-width: 0; padding: 0 7px; background: var(--field); border: 1px solid var(--edge); border-radius: var(--r); outline: none; }
+input.field[type=text]:focus { border-color: var(--sel); }
 input.field[type=number] { height: var(--h); min-width: 0; padding: 0 7px; background: var(--field); border: 1px solid var(--edge); border-radius: var(--r); outline: none; }
 input.field[type=number]:focus { border-color: var(--sel); }
 #vidFmt .chip:last-child { grid-column: span 2; }
@@ -198,6 +200,7 @@ details.panel[open] > summary::before { transform: rotate(90deg); }
 #propEdit { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--edge); padding-top: 8px; margin-top: 2px; }
 #propBoxRows { display: flex; flex-direction: column; gap: 4px; }
 .picRow { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.prop .val, .line .val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .picRow .val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
 #bgPicCtl { display: flex; flex-direction: column; gap: 4px; }
 #bgPicThumb { width: 56px; height: 32px; object-fit: cover; border-radius: 3px; background: #333; flex: none; }
@@ -339,6 +342,31 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
             <select id="eyeCell" class="field"><option value="0">Iris 1</option><option value="1">Iris 2</option><option value="2">Iris 3</option><option value="3">Iris 4</option></select>
           </label>
           <label class="num"><input type="range" id="eyeHi" min="0" max="1.5" step="0.05" value="1"><span class="k">Eye shine</span><output></output></label>
+        </div>
+      </details>
+    </div>
+
+    <div class="page" data-tab="pose" hidden>
+      <details class="panel" id="pnlPose" open>
+        <summary>Pose</summary>
+        <div class="body">
+          <label class="check"><input type="checkbox" id="poseEdit"> Show joints</label>
+          <label class="check"><input type="checkbox" id="poseFingers"> Finger joints</label>
+          <div class="hint">Click a joint in the view and drag its rings to turn it. Changes sit on top of the motion, so pictures, videos and exports keep them. Ctrl+Z undoes.</div>
+          <div class="prop"><span>Joint</span><span class="val" id="poseJoint">none</span></div>
+          <div class="seg" style="--cols:2">
+            <button class="chip" id="poseResetJoint">Reset joint</button>
+            <button class="chip" id="poseResetAll">Reset all</button>
+          </div>
+          <div class="hint" id="poseCount"></div>
+        </div>
+      </details>
+      <details class="panel" id="pnlPoseSaved" open>
+        <summary>Saved poses</summary>
+        <div class="body">
+          <div class="line"><input type="text" id="poseName" class="field grow" placeholder="Name"><button class="b" id="poseSaveBtn">Save</button></div>
+          <div class="stack" id="poseSaved"></div>
+          <div class="hint">A saved pose keeps your joint changes. Loading puts them on top of whatever motion is playing.</div>
         </div>
       </details>
     </div>
@@ -494,6 +522,7 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
   </div>
   <nav class="tabs">
     <button data-tab="face">Face</button>
+    <button data-tab="pose">Pose</button>
     <button data-tab="props">Props</button>
     <button data-tab="render">Render</button>
     <button data-tab="look">Look</button>
