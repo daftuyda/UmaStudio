@@ -5,6 +5,7 @@ __pycache__/
 # build_exe.ps1 output
 viewer/.build-venv/
 viewer/build/
+viewer/build-next/
 viewer/dist/
 viewer/dist-next/
 viewer/UmaStudio.spec
