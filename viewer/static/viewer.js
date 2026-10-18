@@ -98,11 +98,11 @@ function fillUmas() {
   const box = $('#umaGrid');
   box.innerHTML = '';
   for (const c of charas) {
-    if (!!c.mob !== (umaKind === 'mob')) continue;
+    if ((c.mob ? 'mob' : c.mini ? 'mini' : 'main') !== umaKind) continue;
     if (f && !c.name.toLowerCase().includes(f) && !String(c.id).includes(f)) continue;
     const b = document.createElement('button');
     b.className = 'uma' + (current && current.chara === c.id ? ' on' : '');
-    b.innerHTML = `<img loading="lazy" alt="" src="/api/icon/${c.id}"><span>${c.name}</span>`;
+    b.innerHTML = `<img loading="lazy" alt="" src="/api/icon/${c.base || c.id}"><span>${c.name}</span>`;
     b.querySelector('img').onerror = e => { e.target.style.visibility = 'hidden'; };
     b.onclick = () => { closePicker(); chooseUma(c); };
     box.appendChild(b);
@@ -127,7 +127,7 @@ async function chooseUma(c, dressId) {
   const d = c.dresses.find(x => x.id === dressId) || own[0] || shared[0];
   sel.value = d.id;
   sel.onchange = () => openUma(c, c.dresses.find(x => String(x.id) === sel.value));
-  $('#umaImg').src = `/api/icon/${c.id}`;
+  $('#umaImg').src = `/api/icon/${c.base || c.id}`;
   $('#umaName').textContent = c.name;
   await openUma(c, d);
 }
@@ -165,6 +165,7 @@ async function loadModel(pack, manifest, sets, chara, dress) {
 
   const meshes = [];
   gltf.scene.traverse(o => { if (o.isMesh) meshes.push(o); });
+  const miniParts = {};
   const outlines = [];
   for (const mesh of meshes) {
     const ud = mesh.material.userData || {};
@@ -177,7 +178,8 @@ async function loadModel(pack, manifest, sets, chara, dress) {
     if (kind === 'tear') mesh.visible = false;
     // eyes and brows show through the bangs, like in the game: they mark the stencil and hair
     // skips those pixels
-    if (kind === 'eye' || kind === 'mayu') {
+    if (kind.startsWith('mini')) (miniParts[kind] ??= []).push(mesh);
+    if (kind === 'eye' || kind === 'mayu' || kind === 'minieye' || kind === 'minimayu') {
       Object.assign(mesh.material, { stencilWrite: true, stencilRef: 1, stencilZPass: THREE.ReplaceStencilOp });
       mesh.renderOrder = 2;
     } else if (kind === 'hair') {
@@ -187,6 +189,7 @@ async function loadModel(pack, manifest, sets, chara, dress) {
     else if (kind === 'face') mesh.renderOrder = 1;
     if (['body', 'hair', 'face', 'tail'].includes(kind) && mesh.isSkinnedMesh) {
       const o = new THREE.SkinnedMesh(mesh.geometry, makeOutline(ud, tex));
+      if (manifest.mini) o.material.uniforms.uWidth.value *= 0.4;   // full-size line widths swamp a chibi
       o.bind(mesh.skeleton, mesh.bindMatrix);
       o.position.copy(mesh.position); o.quaternion.copy(mesh.quaternion); o.scale.copy(mesh.scale);
       o.frustumCulled = false;
@@ -204,7 +207,7 @@ async function loadModel(pack, manifest, sets, chara, dress) {
   scene.add(root);
   const rest = new Map();
   root.traverse(o => { if (o.isBone || o.type === 'Object3D') rest.set(o, [o.position.clone(), o.quaternion.clone(), o.scale.clone()]); });
-  current = { pack, base, manifest, sets, root, rest, outlines, chara: chara.id, name: chara.name, dress: dress.name,
+  current = { pack, base, manifest, sets, root, rest, outlines, chara: chara.id, name: chara.name, dress: dress.name, miniParts,
               mixer: new THREE.AnimationMixer(root), action: null, clips: new Map(), springs: null, named: {} };
   follow.root = null;
   current.mixer.timeScale = parseFloat($('#speed').value);
@@ -225,8 +228,13 @@ async function loadModel(pack, manifest, sets, chara, dress) {
   await loadFace();
   setCamera(shot.cam);
   fillPoses();
-  const idle = manifest.motions.find(m => /idle01_loop$/i.test(m.name)) || manifest.motions[0];
-  if (idle) {
+  // chibis pose from the chibi motions, everyone else not
+  if (!!manifest.mini !== (poseCat === 'mini')) { poseCat = manifest.mini ? 'mini' : 'own'; $('#poseCat').value = poseCat; fillPoses(); }
+  const idle = !manifest.mini && (manifest.motions.find(m => /idle01_loop$/i.test(m.name)) || manifest.motions[0]);
+  if (manifest.mini) {
+    const path = manifest.mini.idle || '3d/motion/mini/event/body/type00/anm_min_eve_type00_idle01_loop';
+    await playClip(await libraryClip(path), path, true, 'Idle').catch(() => {});
+  } else if (idle) {
     const st = sets.find(x => x.parts.some(([, k]) => k === idle.name));
     await playClip(await ownClip(idle.name), idle.name, true, st ? st.title : 'idle');
   } else {
@@ -242,7 +250,7 @@ async function loadModel(pack, manifest, sets, chara, dress) {
 // its main part, and the playing set shows a row of buttons for its other parts (start, loop,
 // end, still, reactions, cut-in shots). a category loads whole, once, and is searched here.
 
-const POSE_CATS = [['own', 'Her poses'], ['event', 'Everyday'], ['charaevent', 'Characters'], ['victory', 'Victory'],
+const POSE_CATS = [['own', 'Her poses'], ['mini', 'Chibi'], ['event', 'Everyday'], ['charaevent', 'Characters'], ['victory', 'Victory'],
                    ['cutin', 'Cut-ins'], ['live', 'Dance'], ['home', 'Home'], ['training', 'Training'], ['story', 'Story']];
 let poseCat = store.get('poseCat', 'own');
 let poseKey = null;          // the part playing: a motion name (her own) or a library path
@@ -515,8 +523,43 @@ const faceHint = l => { const n = l.replace(/^_/, ''); const f = FACE_HINTS.find
 const withHint = n => faceHint(n) ? `${n} — ${faceHint(n)}` : n;
 const parseParts = v => String(v || 'Base').split('|').map(x => { const m = x.match(/^(.*?)(?:__(\d+))?$/); return [m[1], m[2] ? +m[2] / 100 : 1]; });
 
+// chibi faces: no face bones, the eyes, mouth and brows are tiles picked from atlases. presets
+// come from the game (mini_face_type_data); the part menus pick single tiles.
+let mini = null;   // { faces, st: { brow_l, brow_r, eye_l, eye_r, mouth, cheek } }
+const tile = (i, rows) => new THREE.Vector2(0.25 * (i % 4), (1 / rows) * Math.floor(i / 4));
+function applyMiniFace() {
+  if (!mini?.st) return;
+  const st = mini.st, parts = current.miniParts;
+  const set = (kind, f) => (parts[kind] || []).forEach(m => f(m.material.uniforms.uTile.value, m));
+  set('minieye', v => { const r = tile(st.eye_r, 8), l = tile(st.eye_l, 8); v.set(r.x, r.y, l.x, l.y); });
+  set('minimouth', v => { const t = tile(st.mouth, 8); v.set(t.x, t.y, t.x, t.y); });
+  set('minimayu', (v, m) => { const t = tile(/_L$/.test(m.name) ? st.brow_l : st.brow_r, 4); v.set(t.x, t.y, t.x, t.y); });
+  current.root.traverse(o => { if (o.isMesh && o.name === 'M_Cheek') o.visible = st.cheek > 0; });
+}
+function setupMiniFace() {
+  mini = { faces: current.manifest.mini.faces, st: null };
+  const have = new Set(mini.faces.map(f => f.label));
+  const chips = $('#faces');
+  chips.innerHTML = '';
+  for (const [label, text] of FACE_CHIPS) {
+    if (!have.has(label)) continue;
+    const b = document.createElement('button');
+    b.className = 'chip'; b.dataset.face = label; b.textContent = text;
+    b.onclick = () => setFace(label);
+    chips.appendChild(b);
+  }
+  const sel = $('#facePreset');
+  sel.length = 0;
+  sel.add(new Option('More expressions…', ''));
+  mini.faces.forEach(f => sel.add(new Option(withHint(f.label), f.label)));
+  const nums = (s, n) => { s.length = 0; for (let i = 0; i < n; i++) s.add(new Option(`Tile ${i + 1}`, i)); };
+  nums($('#faceBrow'), 9); nums($('#faceEye'), 15); nums($('#faceMouth'), 19);
+  setFace(have.has('WaraiA') ? 'WaraiA' : mini.faces[0]?.label);
+}
+
 async function loadFace() {
-  face = null; faceBones = null;
+  face = null; faceBones = null; mini = null;
+  if (current.manifest.mini) { setupMiniFace(); bindEyeTrace(); return; }
   if (current.manifest.face) {
     face = await getJson(current.base + 'face.json');
     faceBones = {};
@@ -552,6 +595,16 @@ function fillFace() {
 }
 
 function setFace(label) {
+  if (mini) {
+    const f = mini.faces.find(x => x.label === label);
+    if (!f) return;
+    mini.st = { ...f };
+    const chip = $(`#faces .chip[data-face="${label}"]`);
+    radio('#faces .chip', chip);
+    $('#facePreset').value = chip ? '' : label;
+    $('#faceBrow').value = f.brow_l; $('#faceEye').value = f.eye_l; $('#faceMouth').value = f.mouth;
+    return applyMiniFace();
+  }
   const p = face && face.presets.find(x => x.label === label);
   if (!p) return;
   for (const k of Object.keys(faceState)) faceState[k] = p[k] || 'Base';
@@ -564,9 +617,10 @@ function setFace(label) {
   $('#faceMouth').value = main(faceState.mouth);
 }
 $('#facePreset').onchange = () => { if ($('#facePreset').value) setFace($('#facePreset').value); };
-$('#faceBrow').onchange = () => { faceState.eyebrow_l = faceState.eyebrow_r = $('#faceBrow').value; radio('#faces .chip', null); };
-$('#faceEye').onchange = () => { faceState.eye_l = faceState.eye_r = $('#faceEye').value; radio('#faces .chip', null); };
-$('#faceMouth').onchange = () => { faceState.mouth = $('#faceMouth').value; radio('#faces .chip', null); };
+const miniPick = (keys, v) => { keys.forEach(k => { mini.st[k] = +v; }); radio('#faces .chip', null); applyMiniFace(); };
+$('#faceBrow').onchange = () => { if (mini) return miniPick(['brow_l', 'brow_r'], $('#faceBrow').value); faceState.eyebrow_l = faceState.eyebrow_r = $('#faceBrow').value; radio('#faces .chip', null); };
+$('#faceEye').onchange = () => { if (mini) return miniPick(['eye_l', 'eye_r'], $('#faceEye').value); faceState.eye_l = faceState.eye_r = $('#faceEye').value; radio('#faces .chip', null); };
+$('#faceMouth').onchange = () => { if (mini) return miniPick(['mouth'], $('#faceMouth').value); faceState.mouth = $('#faceMouth').value; radio('#faces .chip', null); };
 
 const _fq = new THREE.Quaternion(), _fe = new THREE.Euler();
 function applyFace() {
@@ -767,7 +821,13 @@ function setCamera(preset) {
   const floor = bonePos('Position', new THREE.Vector3()).y;
   const top = head.y + 0.2;
   let target, span;
-  if (preset === 'face') { target = head.clone().add(new THREE.Vector3(0, 0.08, 0)); span = 0.42; }
+  if (current.manifest.mini) {
+    // chibis are mostly head: frame from the posed model's real top instead of fixed sizes
+    const crown = new THREE.Box3().setFromObject(current.root, true).max.y;
+    if (preset === 'face') { target = new THREE.Vector3(head.x, (head.y + crown) / 2, head.z); span = (crown - head.y) * 1.2; }
+    else if (preset === 'upper') { target = new THREE.Vector3(head.x, (chest.y + crown) / 2, head.z); span = (crown - chest.y) * 1.35; }
+    else { target = new THREE.Vector3(head.x, (floor + crown) / 2, head.z); span = (crown - floor) * 1.12; }
+  } else if (preset === 'face') { target = head.clone().add(new THREE.Vector3(0, 0.08, 0)); span = 0.42; }
   else if (preset === 'upper') { target = chest.clone().add(new THREE.Vector3(0, 0.1, 0)); span = 0.95; }
   else { target = new THREE.Vector3(head.x, (floor + top) / 2, head.z); span = (top - floor) * 1.1; }
   // fit the subject inside the render guide, not the whole viewport
@@ -1275,6 +1335,13 @@ function exportMaterial(m) {
     }
     const k = u.eyeHi.value;
     return new THREE.MeshStandardMaterial({ map: iris, emissive: new THREE.Color(k, k, k), emissiveMap: shine, roughness: 1, metalness: 0 });
+  }
+  if (u.uTile) {
+    // chibi face parts: the chosen tile as a texture offset (both eyes take the first one's)
+    const t = main.clone();
+    t.offset.set(u.uTile.value.x, u.uTile.value.y);
+    t.needsUpdate = true;
+    return new THREE.MeshBasicMaterial({ map: t, side: m.side, alphaTest: cut });
   }
   if (!u.uToon) return new THREE.MeshBasicMaterial({ map: main, side: m.side, alphaTest: cut });
   return new THREE.MeshStandardMaterial({ map: main, side: m.side, roughness: 1, metalness: 0, alphaTest: Math.max(cut, hairCut) });

@@ -142,6 +142,22 @@ void main() {
   gl_FragColor = vec4(min(c, vec3(1.0)) * bright, 1.0);
 }`;
 
+// chibi face parts: tiles in an atlas. uTile.xy shifts the part, or for the eyes the first half
+// of the cell (one eye), uTile.zw the other half (uSplit is where the halves meet).
+const TILE_FRAG = /* glsl */`
+uniform sampler2D uMain;
+uniform vec4 uTile;
+uniform float uSplit;
+uniform float bright;
+uniform float uCutout;
+varying vec2 vUv;
+void main() {
+  vec2 o = vUv.x < uSplit ? uTile.xy : uTile.zw;
+  vec4 c = texture2D(uMain, vUv + o);
+  if (c.a < uCutout) discard;
+  gl_FragColor = vec4(c.rgb * bright, 1.0);
+}`;
+
 // blush: multiplies what is already drawn, leaves alpha alone
 const CHEEK_FRAG = /* glsl */`
 uniform sampler2D uMain;
@@ -203,7 +219,10 @@ BLACK.needsUpdate = true;
 
 export function kindOf(ud) {
   const s = ud.shader || '', n = (ud.mesh || '');
-  if (s.includes('Cheek')) return 'cheek';
+  if (s.includes('MiniCharaEye')) return 'minieye';
+  if (s.includes('UnlitZIgnoreTransparent')) return 'minimayu';
+  if (n === 'M_Mouth') return 'minimouth';
+  if (s.includes('Cheek') || s.includes('UnlitMultiply')) return 'cheek';
   if (s.includes('Tear')) return 'tear';
   if (s.includes('ToonEye')) return 'eye';
   if (s.includes('ToonMayu')) return 'mayu';
@@ -242,6 +261,13 @@ export function makeMaterial(kind, ud, tex, opts = {}) {
       blending: THREE.CustomBlending, blendEquation: THREE.AddEquation,
       blendSrc: THREE.DstColorFactor, blendDst: THREE.ZeroFactor,
       blendSrcAlpha: THREE.ZeroFactor, blendDstAlpha: THREE.OneFactor,
+    });
+  }
+  if (kind === 'minieye' || kind === 'minimayu' || kind === 'minimouth') {
+    return new THREE.ShaderMaterial({
+      vertexShader: VERT, fragmentShader: TILE_FRAG,
+      uniforms: { uMain: { value: main }, uTile: { value: new THREE.Vector4() }, uSplit: { value: kind === 'minieye' ? 0.125 : 2 },
+                  bright: U.bright, uCutout: { value: kind === 'minimayu' ? 0.5 : 0 } },
     });
   }
   if (kind === 'eye') {

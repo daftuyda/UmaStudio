@@ -235,9 +235,9 @@ class GameData:
                        "name": names.get(r[0], f"Chara {r[0]}")}
                       for r in db.execute("SELECT id, height, shape, bust, tail_model_id, skin, socks FROM chara_data ORDER BY id")]
             dresses = [{"id": r[0], "chara": r[1], "body_type": r[2], "body_sub": r[3], "head_sub": r[4], "tail": r[5],
-                        "name": dress_names.get(r[0], f"Outfit {r[0]}")}
-                       for r in db.execute("SELECT id, chara_id, body_type, body_type_sub, head_sub_id, tail_model_id "
-                                           "FROM dress_data ORDER BY id")]
+                        "setting": r[6], "mini": bool(r[7]), "name": dress_names.get(r[0], f"Outfit {r[0]}")}
+                       for r in db.execute("SELECT id, chara_id, body_type, body_type_sub, head_sub_id, tail_model_id, "
+                                           "body_setting, have_mini FROM dress_data ORDER BY id")]
         finally:
             db.close()
         out = []
@@ -249,8 +249,9 @@ class GameData:
             if ds:
                 out.append({**c, "dresses": ds})
         mobs = self.mobs(dresses)
-        out += mobs
-        self._charas = {c["id"]: c for c in charas + mobs}
+        minis = self.minis(charas, dresses)
+        out += mobs + minis
+        self._charas = {c["id"]: c for c in charas + mobs + minis}
         self._dresses = {d["id"]: d for d in dresses}
         return out
 
@@ -285,6 +286,67 @@ class GameData:
                 out.append({**c, "dresses": ds})
         return out
 
+    # chibi versions: ids are 100000 + the character's, so they never clash with her full size
+    MINI = 100000
+
+    def minis(self, charas, dresses):
+        out = []
+        for c in charas:
+            if not self.prefix(f"3d/chara/mini/head/mchr{c['id']:04d}_00/pfb_"):
+                continue
+            m = {**c, "id": self.MINI + c["id"], "base": c["id"], "mini": True}
+            ds = [{"id": d["id"], "name": d["name"], "own": d["chara"] == c["id"]}
+                  for d in dresses if d["mini"] and d["chara"] in (0, c["id"]) and self.mini_body(m, d)]
+            ds.sort(key=lambda d: not d["own"])
+            if ds:
+                out.append({**m, "dresses": ds})
+        return out
+
+    def mini_faces(self):
+        """Chibi expressions: per label, which tile each eyebrow, eye and the mouth show."""
+        db = sqlite3.connect(f"file:{MASTER}?mode=ro", uri=True)
+        try:
+            return [{"label": r[0], "brow_l": r[1], "brow_r": r[2], "eye_l": r[3], "eye_r": r[4], "mouth": r[5], "cheek": r[6]}
+                    for r in db.execute("SELECT label, eyebrow_l, eyebrow_r, eye_l, eye_r, mouth, cheek FROM mini_face_type_data")]
+        finally:
+            db.close()
+
+    def mini_body(self, c, d):
+        """The mini body prefab and its textures for an outfit, or None."""
+        if d["chara"]:
+            folder = f"3d/chara/mini/body/mbdy{c['base']:04d}_{d['body_sub']:02d}/"
+            body = next(iter(self.prefix(folder + "pfb_")), None)
+            texs = self.prefix(folder + "textures/")
+        else:
+            folder = f"3d/chara/mini/body/mbdy{d['body_type']:04d}_{d['body_sub']:02d}/"
+            stem = f"mbdy{d['body_type']:04d}_{d['body_sub']:02d}_{d['setting']:02d}"
+            body = folder + f"pfb_{stem}_0"
+            texs = [p for p in self.prefix(folder + "textures/") if f"tex_{stem}_{c['skin']}_0_" in p]
+        if not body or body not in self.entries or not self.entries[body].local:
+            return None
+        return folder, body, texs
+
+    def mini_paths(self, c, d):
+        folder, body, texs = self.mini_body(c, d)
+        cid = c["base"]
+        paths = [body, *texs]
+        paths += [p for p in self.prefix(folder + "clothes/") if p.endswith("_cloth00") or "_skirt00" in p]
+        head_dir = f"3d/chara/mini/head/mchr{cid:04d}_{d['head_sub']:02d}/"
+        if not self.prefix(head_dir + "pfb_"):
+            head_dir = f"3d/chara/mini/head/mchr{cid:04d}_00/"
+        paths += [p for p in self.prefix(head_dir) if "/clothes/" not in p or p.endswith("_cloth00")]
+        # the face mesh is shared by every chibi, textured by skin tone
+        face_dir = "3d/chara/mini/head/mchr0001_00/"
+        paths += [face_dir + "pfb_mchr0001_00_face0"]
+        paths += [p for p in self.prefix(face_dir + "textures/") if f"_face0_{c['skin']}_" in p]
+        tail = d["tail"] if d["tail"] > 0 else c["tail"]
+        if tail > 0:
+            tail_dir = f"3d/chara/mini/tail/mtail{tail:04d}_00/"
+            paths += self.prefix(tail_dir + "pfb_")
+            paths += [p for p in self.prefix(tail_dir + "clothes/") if p.endswith("_cloth00")]
+            paths += [p for p in self.prefix(tail_dir + "textures/") if f"_{cid:04d}_" in p or "_0000_" in p]
+        return [p for p in paths if p in self.entries and self.entries[p].local]
+
     def body_paths(self, c, d):
         if d["chara"]:
             folder = f"3d/chara/body/bdy{c['id']:04d}_{d['body_sub']:02d}/"
@@ -309,6 +371,8 @@ class GameData:
         if not getattr(self, "_charas", None):
             self.charas()
         c, d = self._charas[chara_id], self._dresses[dress_id]
+        if c.get("mini"):
+            return c, d, self.mini_paths(c, d)
         bodies = self.body_paths(c, d)
         if not bodies:
             raise ValueError("no body model for that outfit")
@@ -377,6 +441,8 @@ class GameData:
                 "body_type": d["body_type"], "body_sub": d["body_sub"], "shared": not d["chara"]}
         if c.get("mob"):
             info["mob"] = c["mob"]
+        if c.get("mini"):
+            info.update(mini=True, chara=c["base"], head_sub=d["head_sub"])
         # only when it changed: a newer file in the pack makes the viewer convert it again
         path = os.path.join(folder, "pack.json")
         old = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else None

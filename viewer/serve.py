@@ -130,7 +130,13 @@ def load(chara_id, dress_id):
     need_data()
     charas()
     name = DATA.build_pack(chara_id, dress_id, PACKS)
-    return name, convert(name)
+    manifest = convert(name)
+    c = DATA._charas.get(chara_id, {})
+    if c.get("mini"):
+        # chibi faces are tiles in texture atlases: the game's expression presets pick them
+        idle = f"3d/motion/mini/event/body/chara/chr{c['base']:04d}_00/anm_min_eve_chr{c['base']:04d}_00_idle01_loop"
+        manifest = {**manifest, "mini": {"faces": DATA.mini_faces(), "idle": idle if idle in DATA.entries else None}}
+    return name, manifest
 
 
 def own_sets(manifest):
@@ -227,6 +233,7 @@ LIBRARY = [
     ("live", "Dance", "3d/motion/live/body/"),
     ("training", "Training", "3d/motion/training/tra/body/"),
     ("story", "Story & menus", "3d/motion/outgame/"),
+    ("mini", "Chibi", "3d/motion/mini/"),
 ]
 SKIP = re.compile(r"(_cam|_pos|_face|_ear|_driven|_camera|_prop)(_|$)")
 

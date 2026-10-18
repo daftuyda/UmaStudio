@@ -128,8 +128,10 @@ class Skeleton:
                 self.add_tree(r, r.read(), i)
         return i
 
-    def graft(self, reader, transform, parent):
-        """Merge a subtree: bones the body already has are reused, the rest are added."""
+    def graft(self, reader, transform, parent, keep_go=False):
+        """Merge a subtree: bones the body already has are reused, the rest are added.
+        keep_go also maps its game objects, so rigid meshes on it get drawn (chibi faces;
+        full-size heads keep their tears and effect lines out this way)."""
         name = go_name(transform)
         if name in self.by_name:
             i = self.by_name[name]
@@ -138,10 +140,12 @@ class Skeleton:
                          conv_quat(transform.m_LocalRotation),
                          [transform.m_LocalScale.x, transform.m_LocalScale.y, transform.m_LocalScale.z])
         self.by_unity[obj_key(reader)] = i
+        if keep_go:
+            self.by_go[(reader.assets_file.name, transform.m_GameObject.path_id)] = i
         for c in transform.m_Children:
             r = deref(c)
             if r:
-                self.graft(r, r.read(), i)
+                self.graft(r, r.read(), i, keep_go)
 
     def path(self, i, root):
         parts = []
@@ -266,6 +270,22 @@ def mob_textures(pack, info, mat_name, texs):
     return {k: v for k, v in want.items() if v}
 
 
+def mini_textures(pack, info, mat_name, texs):
+    """Chibi face parts share one face mesh; the eyes, brows and mouth come from the character's
+    own mini head textures (atlases the page picks tiles from), the skin from her skin tone."""
+    if "_MainTex" in texs:
+        return {}
+    skin, own = info["skin"], f"tex_mchr{info['chara']:04d}_"
+    def find(suffix):
+        return next((n for n in sorted(pack.textures) if n.startswith(own) and n.endswith(suffix)), None)
+    def face(kind):
+        return next((n for n in (f"tex_mchr0001_00_face0_{s}_{kind}" for s in (skin, 0, 1, 2, 3)) if n in pack.textures), None)
+    part = mat_name.rsplit("_", 1)[-1] if not mat_name.endswith(("_mayu_l", "_mayu_r")) else "mayu"
+    want = {"face0": face("diff"), "cheek": face("cheek0"), "eye": find("_eye_diff"),
+            "mouth": find("_mouth_diff"), "mayu": find("_mayu_diff")}.get(part)
+    return {"_MainTex": want} if want else {}
+
+
 def mob_mask(info, mat_name):
     """The six colours (R1 R2 G1 G2 B1 B2) and their shadow versions for one material, or None."""
     mob = info["mob"]
@@ -292,13 +312,14 @@ def mob_mask(info, mat_name):
 
 def convert_model(pack, out):
     roots = pack.roots()
-    body = next((n for n in roots if n.startswith("pfb_bdy")), None)
-    heads = sorted(n for n in roots if n.startswith("pfb_chr"))   # background Umas: a face and a hair part
+    # chibis use pfb_mbdy / pfb_mchr / pfb_mtail; background Umas and chibis have two head parts
+    body = next((n for n in roots if n.startswith(("pfb_bdy", "pfb_mbdy"))), None)
+    heads = sorted(n for n in roots if n.startswith(("pfb_chr", "pfb_mchr")))
     head = heads[0] if heads else None
-    tail = next((n for n in roots if n.startswith("pfb_tail")), None)
+    tail = next((n for n in roots if n.startswith(("pfb_tail", "pfb_mtail"))), None)
     if not body:
         raise SystemExit("no body prefab in the pack")
-    chara = chara_id_from(roots)
+    chara = f"{pack.info['chara']:04d}" if pack.info.get("mini") else chara_id_from(roots)
 
     sk = Skeleton()
     root_reader, root_t = roots[body]
@@ -310,7 +331,7 @@ def convert_model(pack, out):
         for c in t.m_Children:
             r = deref(c)
             if r and go_name(r.read()) == attach:
-                sk.graft(r, r.read(), sk.by_name.get(attach, root))
+                sk.graft(r, r.read(), sk.by_name.get(attach, root), keep_go=bool(pack.info.get("mini")))
 
     write_model(pack, sk, root, out, chara)
     # bone paths relative to the body root, keyed by Unity's CRC32 path hash, so motions can
@@ -389,6 +410,8 @@ def write_model(pack, sk, root, out, chara):
                     if n:
                         texs[slot] = n
                         break
+        if info.get("mini"):
+            texs.update(mini_textures(pack, info, m.m_Name, texs))
         mask = None
         if info.get("mob"):
             texs.update(mob_textures(pack, info, m.m_Name, texs))
@@ -765,7 +788,7 @@ def convert_physics(pack):
         if "springParam" in d:
             r = o.read()
             name = r.m_GameObject.read().m_Name if r.m_GameObject else ""
-            kind = ("bust" if "_bust" in name else "body") if name.startswith("pfb_bdy") else                 "head" if name.startswith("pfb_chr") else "tail" if name.startswith("pfb_tail") else None
+            kind = ("bust" if "_bust" in name else "body") if name.startswith(("pfb_bdy", "pfb_mbdy")) else                 "head" if name.startswith(("pfb_chr", "pfb_mchr")) else "tail" if name.startswith(("pfb_tail", "pfb_mtail")) else None
             if kind:
                 d.pop("m_Script", None)
                 d.pop("m_GameObject", None)
