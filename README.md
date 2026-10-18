@@ -25,19 +25,25 @@ the first time you open her, after that she loads from the cache.
 
 ## How to use it
 
-- **Choose an Uma** (top left), then the outfit next to it.
+- **Choose an Uma** (top left), then the outfit next to it. The picker has three tabs: the main
+  Umas, their **Chibi** versions, and the **Background Umas** from races and events.
 - **Poses** (left): pick a category, search in plain English ("arms crossed", "waving", "phone").
   A pose with several parts shows buttons for them (start, loop, end, still). Pause anywhere on the
-  timeline and that frame is your pose.
+  timeline and that frame is your pose. Chibis have their own category.
 - **Face**: expressions, single face parts, and "Look at camera".
+- **Pose**: show the joints, click one and turn it with the rings. Changes sit on top of the
+  motion, so pictures, videos and exports keep them. Poses can be saved and loaded.
 - **Props**: one of the game's hand props, or your own picture as a card or a box. A picture can
   also go on a game prop. Drag the handles in the view to place it.
 - **Render**: lens, background (transparent, color, a game background or your own picture),
-  PNG size, and video (MP4, transparent WebM, MOV for editing, GIF).
+  PNG size (presets or your own), video (MP4, transparent WebM, MOV for editing, transparent GIF,
+  or numbered PNG frames), and **Export for Blender**: her mesh, skeleton, textures and props as
+  a .glb, in the current pose or with the motion baked in.
 - **Look**: light, shadow size, outlines, hair and cloth physics.
 
 Mouse: left drag turns the camera, right drag pans, wheel zooms.
-Keys: Space plays/pauses, W / E / R switch the prop handles, Delete removes a prop, Esc lets go.
+Keys: Space plays/pauses, W / E / R switch the prop handles, Delete removes a prop, Esc lets go,
+Ctrl+Z undoes a joint change.
 
 ## Where files go
 
