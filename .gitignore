@@ -1,0 +1,13 @@
+# python
+__pycache__/
+*.pyc
+
+# build_exe.ps1 output
+viewer/.build-venv/
+viewer/build/
+viewer/dist/
+viewer/dist-next/
+viewer/UmaStudio.spec
+
+*.bak
+*.log

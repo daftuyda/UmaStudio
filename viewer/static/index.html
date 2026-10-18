@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UmaStudio</title>
+<link rel="icon" href="data:,">
+<style>
+/* desktop tool in blender's manner: neutral greys, small dense widgets, one blue for
+   selection, panels that fold, a docked timeline and a status bar */
+:root {
+  --gap: #161616; --area: #282828; --panel: #2f2f2f; --head: #363636;
+  --widget: #545454; --widget-hi: #626262; --field: #1d1d1d; --edge: #3d3d3d;
+  --row: #2b2b2b; --row-alt: #282828; --row-hi: #353535;
+  --text: #e3e3e3; --dim: #9c9c9c; --faint: #707070;
+  --sel: #4772b3; --sel-row: #334d80; --bad: #e06c6c;
+  --check-a: #333333; --check-b: #2b2b2b;
+  --h: 22px; --r: 4px;
+}
+* { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: #4a4a4a transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #4a4a4a; border-radius: 4px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--gap); color: var(--text); font: 12px/1.35 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  display: grid; grid-template-columns: 290px minmax(0, 1fr) 316px; grid-template-rows: 38px minmax(0, 1fr) 22px;
+  gap: 2px; height: 100vh; overflow: hidden; user-select: none; }
+button, input, select { font: inherit; color: inherit; }
+[hidden] { display: none !important; }
+.hint { color: var(--dim); font-size: 11px; line-height: 1.45; }
+
+/* --- widgets ------------------------------------------------------------------------- */
+
+button.b, .chip, .tabs button, .part { transition: background-color .12s; }
+button.b { height: var(--h); padding: 0 10px; background: var(--widget); border: 1px solid var(--edge); border-radius: var(--r); cursor: pointer; white-space: nowrap; }
+button.b:hover { background: var(--widget-hi); }
+button.b:active { background: var(--sel); }
+button.big { height: 28px; width: 100%; border: 1px solid var(--edge); border-radius: var(--r); background: var(--widget); cursor: pointer; font-weight: 500;
+  display: flex; align-items: center; justify-content: center; gap: 8px; }
+button.big:hover { background: var(--widget-hi); }
+button.big:disabled { opacity: .5; cursor: default; }
+#render { background: var(--sel); border-color: #3c62a0; }
+#render:hover { background: #5280c4; }
+#record::before { content: ''; width: 9px; height: 9px; border-radius: 50%; background: #d64a4a; }
+button.mini { height: 18px; padding: 0 5px; background: none; border: 0; border-radius: 3px; cursor: pointer; color: var(--dim); font-size: 11px; }
+button.mini:hover { background: var(--widget); color: var(--text); }
+button:focus-visible, select:focus-visible, input:focus-visible, .row:focus-visible { outline: 1px solid var(--sel); outline-offset: -1px; }
+
+/* choices drawn as one joined block, like blender shows an expanded enum */
+.seg { display: grid; grid-template-columns: repeat(var(--cols, 3), minmax(0, 1fr)); gap: 1px; background: var(--edge);
+  border: 1px solid var(--edge); border-radius: var(--r); overflow: hidden; }
+.seg .chip { height: 20px; padding: 0 4px; border: 0; border-radius: 0; background: var(--widget); cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.seg .chip:hover { background: var(--widget-hi); }
+.seg .chip.on { background: var(--sel); color: #fff; }
+
+select.field, select.pill, input[type=search], input[type=color] { height: var(--h); background: var(--field); border: 1px solid var(--edge); border-radius: var(--r); outline: none; }
+select.field, select.pill { appearance: none; padding: 0 22px 0 7px; cursor: pointer; min-width: 0; text-overflow: ellipsis;
+  background: var(--field) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0h8L4 5z' fill='%239c9c9c'/%3E%3C/svg%3E") no-repeat right 8px center; }
+select.field { width: 100%; }
+select option, select optgroup { background: #282828; }
+input[type=search] { width: 100%; padding: 0 8px 0 24px;
+  background: var(--field) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='11' fill='none' stroke='%239c9c9c' stroke-width='1.5'%3E%3Ccircle cx='4.5' cy='4.5' r='3.6'/%3E%3Cpath d='M7.2 7.2l3.3 3.3'/%3E%3C/svg%3E") no-repeat 8px center; }
+input[type=search]:focus, select:focus { border-color: var(--sel); }
+input[type=color] { width: 100%; padding: 2px; cursor: pointer; }
+
+input[type=checkbox] { appearance: none; flex: none; width: 14px; height: 14px; margin: 0; border-radius: 3px; background: var(--widget);
+  border: 1px solid var(--edge); display: inline-grid; place-content: center; cursor: pointer; }
+input[type=checkbox]:checked { background: var(--sel); border-color: var(--sel); }
+input[type=checkbox]:checked::after { content: ''; width: 7px; height: 4px; border: 2px solid #fff; border-top: 0; border-right: 0; transform: translateY(-1px) rotate(-45deg); }
+label.check { display: flex; gap: 7px; align-items: center; min-height: var(--h); cursor: pointer; }
+
+/* number sliders: label and value sit inside the bar, which fills up to the value */
+.num { position: relative; display: block; height: var(--h); border-radius: var(--r); overflow: hidden; background: var(--widget); border: 1px solid var(--edge); }
+.num:hover { background: var(--widget-hi); }
+.num input { -webkit-appearance: none; appearance: none; position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; cursor: ew-resize;
+  background: linear-gradient(#5a7fb8, #4772b3) 0 0 / var(--p, 0%) 100% no-repeat; }
+.num input::-webkit-slider-thumb { -webkit-appearance: none; width: 0; height: 20px; }
+.num .k, .num output { position: absolute; top: 0; line-height: 20px; pointer-events: none; text-shadow: 0 1px 1px rgba(0,0,0,.35); }
+.num .k { left: 8px; }
+.num output { right: 8px; font-variant-numeric: tabular-nums; }
+
+/* label | widget, Blender's property row */
+.prop { display: grid; grid-template-columns: 38% minmax(0, 1fr); gap: 8px; align-items: center; }
+.prop > span:first-child { color: var(--dim); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stack { display: flex; flex-direction: column; gap: 4px; }
+.line { display: flex; gap: 4px; align-items: center; }
+.line > .grow { flex: 1; min-width: 0; }
+
+/* --- top bar ----------------------------------------------------------------------------- */
+
+header { grid-column: 1 / 4; display: flex; align-items: center; gap: 8px; padding: 0 8px; background: var(--area); }
+.brand { display: flex; align-items: center; gap: 7px; font-weight: 600; color: #cfcfcf; margin-right: 6px; }
+.brand svg { width: 18px; height: 18px; }
+#umaBtn { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px 0 2px; background: var(--field); border: 1px solid var(--edge);
+  border-radius: var(--r); cursor: pointer; text-align: left; min-width: 200px; }
+#umaBtn:hover { border-color: #555; }
+#umaBtn img { width: 26px; height: 26px; border-radius: 3px; background: #333; object-fit: contain; }
+#umaBtn b { display: block; font-weight: 500; line-height: 1.15; }
+#umaBtn small { display: block; color: var(--dim); font-size: 11px; line-height: 1.15; }
+select.pill { max-width: 300px; }
+
+/* --- areas ---------------------------------------------------------------------------------- */
+
+.area { background: var(--area); border-radius: 6px; overflow: hidden; min-height: 0; display: flex; flex-direction: column; }
+.areahead { display: flex; align-items: center; gap: 4px; padding: 4px 6px; background: var(--head); flex: none; }
+
+/* poses: an outliner */
+#poseCat { flex: 0 0 120px; }
+label.toggle { display: flex; align-items: center; height: var(--h); padding: 0 7px; border-radius: var(--r); background: var(--widget);
+  border: 1px solid var(--edge); cursor: pointer; color: var(--dim); white-space: nowrap; }
+label.toggle:has(input:checked) { background: var(--sel); color: #fff; border-color: var(--sel); }
+label.toggle input { display: none; }
+#poses { flex: 1; overflow-y: auto; padding-bottom: 8px; }
+.row { display: flex; align-items: center; gap: 4px; min-height: 22px; padding: 0 8px 0 calc(6px + var(--depth, 0) * 16px); cursor: pointer; white-space: nowrap; outline: none; }
+#poses .row:nth-child(odd) { background-color: var(--row); }
+#poses .row:nth-child(even) { background-color: var(--row-alt); }
+#poses .row:hover { background-color: var(--row-hi); }
+#poses .row.on, #poses .row.parts { background-color: var(--sel-row); color: #fff; }
+.row .tw { flex: none; width: 12px; height: 12px; position: relative; }
+.row.fam .tw::before { content: ''; position: absolute; left: 3px; top: 2px; border: 4px solid transparent; border-left: 5px solid var(--dim); transition: transform .12s; transform-origin: 2px 4px; }
+.row.fam.open .tw::before { transform: rotate(90deg); }
+.row .t { overflow: hidden; text-overflow: ellipsis; }
+.row small { color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
+.row.on small { color: #c4d3ea; }
+.row .n { margin-left: auto; padding-left: 8px; color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }.row.loading { opacity: .5; }
+.row.parts { padding-top: 2px; padding-bottom: 5px; cursor: default; }
+.row.parts .seg { --cols: 4; flex: 1; }
+.empty { color: var(--dim); padding: 14px 12px; }
+
+/* viewport */
+.viewport .areahead { gap: 8px; }
+#cams { --cols: 3; width: 260px; }
+#stage { position: relative; flex: 1; min-height: 0; overflow: hidden; background: repeating-conic-gradient(var(--check-a) 0% 25%, var(--check-b) 0% 50%) 50% / 20px 20px; }
+#stage.solid { background: var(--stage-color, #808080); }
+canvas#view { width: 100%; height: 100%; display: block; outline: none; }
+#frameGuide { position: absolute; border: 1px solid rgba(255,255,255,.35); pointer-events: none; box-shadow: 0 0 0 9999px rgba(0,0,0,.3); display: none; }
+#overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dim); pointer-events: none; font-size: 14px; text-align: center; padding: 30px; }
+#recBar { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); display: none; align-items: center; gap: 10px;
+  padding: 4px 6px 4px 12px; border-radius: var(--r); background: var(--head); border: 1px solid #6b3434; }
+#recBar progress { width: 220px; accent-color: var(--sel); }
+#recBar span:first-child::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #d64a4a; margin-right: 7px; }
+
+/* the timeline, docked under the view */
+#player { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 8px; background: var(--head); flex: none; }
+#play { width: 28px; height: var(--h); border-radius: var(--r); border: 1px solid var(--edge); background: var(--widget); cursor: pointer; font-size: 10px; flex: none; }
+#play:hover { background: var(--widget-hi); }
+#scrub { -webkit-appearance: none; appearance: none; flex: 1; height: var(--h); margin: 0; border-radius: var(--r); cursor: pointer;
+  background: repeating-linear-gradient(90deg, #3a3a3a 0 1px, transparent 1px 24px), var(--field); border: 1px solid var(--edge); }
+#scrub::-webkit-slider-thumb { -webkit-appearance: none; width: 3px; height: 20px; background: var(--sel); border-radius: 1px; box-shadow: 0 0 0 1px rgba(0,0,0,.4); }
+#time { font-variant-numeric: tabular-nums; color: var(--text); width: 52px; text-align: right; }
+#speed { width: 64px; }
+#follow { width: 118px; flex: none; }
+
+/* --- sidebar: pages with tabs on the outer edge -------------------------------------------- */
+
+.side { flex-direction: row; }
+.pages { flex: 1; min-width: 0; overflow-y: auto; padding: 4px 0 10px; }
+.tabs { display: flex; flex-direction: column; gap: 2px; padding-top: 6px; background: var(--gap); flex: none; }
+.tabs button { writing-mode: vertical-rl; width: 22px; padding: 10px 0; background: var(--area); border: 0; border-radius: 0 var(--r) var(--r) 0;
+  color: var(--dim); cursor: pointer; }
+.tabs button:hover { color: var(--text); }
+.tabs button.on { background: var(--panel); color: var(--text); }
+
+details.panel { margin: 4px 4px 0 6px; border-radius: var(--r); background: var(--panel); }
+details.panel > summary { list-style: none; display: flex; align-items: center; gap: 7px; height: 24px; padding: 0 8px; border-radius: var(--r);
+  background: var(--head); cursor: pointer; font-weight: 500; }
+details.panel > summary::-webkit-details-marker { display: none; }
+details.panel > summary::before { content: ''; border: 4px solid transparent; border-left: 5px solid var(--dim); margin-right: -3px; transform-origin: 2px 4px; transition: transform .12s; }
+details.panel[open] > summary { border-radius: var(--r) var(--r) 0 0; }
+details.panel[open] > summary::before { transform: rotate(90deg); }
+.panel .body { display: flex; flex-direction: column; gap: 6px; padding: 8px; }
+.sub-head { color: var(--dim); font-size: 11px; margin-top: 4px; }
+
+#faces { --cols: 3; }
+#bgs { --cols: 3; }
+#sizes { --cols: 3; }
+#vidLen { --cols: 4; }
+#vidFmt { --cols: 2; }
+#vidFps { --cols: 2; }
+#propFit { --cols: 2; }
+#gizmoModes { --cols: 4; }
+#addRow { --cols: 3; }
+
+/* props */
+#propList { display: flex; flex-direction: column; border-radius: var(--r); overflow: hidden; }
+#propList:empty { display: none; }
+.propItem { display: flex; align-items: center; gap: 4px; height: 22px; padding: 0 4px 0 8px; cursor: pointer; }
+.propItem:nth-child(odd) { background: var(--row); }
+.propItem:nth-child(even) { background: var(--row-alt); }
+.propItem:hover { background: var(--row-hi); }
+.propItem.on { background: var(--sel-row); }
+.propItem.off .name { opacity: .5; }
+.propItem .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#propEdit { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--edge); padding-top: 8px; margin-top: 2px; }
+#propBoxRows { display: flex; flex-direction: column; gap: 4px; }
+.picRow { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.picRow .val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
+#bgPicCtl { display: flex; flex-direction: column; gap: 4px; }
+#bgPicThumb { width: 56px; height: 32px; object-fit: cover; border-radius: 3px; background: #333; flex: none; }
+
+/* --- status bar ------------------------------------------------------------------------------- */
+
+footer { grid-column: 1 / 4; display: flex; align-items: center; gap: 14px; padding: 0 10px; background: var(--area); color: var(--dim); font-size: 11px; min-width: 0; }
+#statusMsg { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+#statusMsg.bad { color: var(--bad); }
+#statusMsg.bad::before { content: 'Error'; background: #8a2f2f; color: #fff; border-radius: 3px; padding: 0 5px; margin-right: 7px; font-size: 10px; }
+#statusMsg a { color: #8db3ef; cursor: pointer; margin-left: 8px; }
+#statusMsg.flash { animation: flash .9s ease-out; }
+@keyframes flash { from { background: rgba(71,114,179,.45); } to { background: transparent; } }
+footer .spacer { flex: 1; }
+#busy { display: none; align-items: center; gap: 6px; color: var(--text); }
+#busy.on { display: flex; }
+#busy i { width: 10px; height: 10px; border-radius: 50%; border: 2px solid #555; border-top-color: #8db3ef; animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+body.busy #stage { cursor: progress; }
+
+/* --- pickers ------------------------------------------------------------------------------------ */
+
+.modal { position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,.45); display: none; }
+.modal .box { position: absolute; inset: 44px 64px; background: var(--area); border: 1px solid #111; border-radius: 6px;
+  box-shadow: 0 16px 48px rgba(0,0,0,.55); display: flex; flex-direction: column; overflow: hidden; }
+.modal .top { display: flex; gap: 6px; align-items: center; padding: 5px 6px 5px 12px; background: var(--head); flex-wrap: wrap; }
+.modal .top h2 { font-size: 12px; font-weight: 600; margin: 0 10px 0 0; }
+.modal .top input { max-width: 260px; }
+.modal .close { margin-left: auto; }
+.modal .foot { padding: 5px 12px; background: var(--head); }
+#imgTabs { --cols: 3; width: 420px; }
+.grid { flex: 1; overflow-y: auto; padding: 10px; display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 4px; align-content: start; }
+#imgGrid { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+#imgGrid.portrait { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+.uma, .tile { background: none; border: 0; border-radius: var(--r); padding: 6px; cursor: pointer; text-align: center; }
+.uma:hover, .tile:hover { background: var(--row-hi); }
+.uma.on { background: var(--sel-row); }
+.uma img { width: 100%; aspect-ratio: 1; object-fit: contain; display: block; border-radius: 3px; background: #2f2f2f; }
+.tile img { width: 100%; aspect-ratio: 1; object-fit: contain; display: block; border-radius: 3px;
+  background: repeating-conic-gradient(var(--check-a) 0% 25%, var(--check-b) 0% 50%) 50% / 14px 14px; }
+.tile.wide img { aspect-ratio: 16 / 9; object-fit: cover; }
+.grid.portrait .tile img { aspect-ratio: 9 / 16; object-fit: cover; }
+.uma span, .tile span { display: block; font-size: 11px; margin-top: 5px; line-height: 1.25; overflow-wrap: anywhere; color: #cfcfcf; }
+.tile.add { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 110px; border: 1px dashed #555; }
+.tile.add b { font-size: 26px; color: var(--dim); font-weight: 300; line-height: 1; }
+.tile.broken { opacity: .4; }
+
+body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px; border: 2px dashed var(--sel); border-radius: 8px;
+  background: rgba(71,114,179,.08); z-index: 40; pointer-events: none; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+#setup { display: none; position: absolute; inset: 0; align-items: center; justify-content: center; z-index: 5; background: rgba(30,30,30,.94); }
+#boot { display: flex; position: absolute; inset: 0; align-items: center; justify-content: center; z-index: 6; background: rgba(30,30,30,.94); }
+#boot > div { width: 300px; display: flex; flex-direction: column; gap: 8px; background: var(--panel); border: 1px solid #111; border-radius: 6px; padding: 16px 18px; }
+#boot progress { width: 100%; accent-color: var(--sel); }
+#setup div { max-width: 440px; background: var(--panel); border: 1px solid #111; border-radius: 6px; padding: 18px 20px; line-height: 1.6; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "/static/vendor/three.module.js", "three/addons/": "/static/vendor/addons/" } }
+</script>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4v7a6 6 0 0 0 12 0V4" fill="none" stroke="#4772b3" stroke-width="3.4" stroke-linecap="round"/></svg>
+    UmaStudio
+  </div>
+  <button id="umaBtn" title="Choose an Uma"><img id="umaImg" alt=""><div><b id="umaName">Choose an Uma</b><small id="umaOutfit">click to pick</small></div></button>
+  <select id="outfit" class="pill" title="Outfit"></select>
+</header>
+
+<aside class="area">
+  <div class="areahead">
+    <select id="poseCat" class="field" title="Which poses to list"></select>
+    <input type="search" id="poseFilter" placeholder="Search" title="Search poses (English words work: arms crossed, waving…)">
+    <label class="toggle" title="List mirrored versions too"><input type="checkbox" id="libMirror">Mirror</label>
+  </div>
+  <div id="poses"></div>
+</aside>
+
+<main class="area viewport">
+  <div class="areahead">
+    <div class="seg" id="cams">
+      <button class="chip on" data-cam="full">Full body</button>
+      <button class="chip" data-cam="upper">Upper body</button>
+      <button class="chip" data-cam="face">Close-up</button>
+    </div>
+    <select id="follow" class="field" title="What the camera moves with (keeping its angle and distance)">
+      <option value="off">No follow</option><option value="body">Follow body</option>
+      <option value="chest">Follow chest</option><option value="head">Follow head</option>
+    </select>
+    <label class="check"><input type="checkbox" id="guide" checked> Frame guide</label>
+  </div>
+  <div id="stage">
+    <canvas id="view" tabindex="0"></canvas>
+    <div id="frameGuide"></div>
+    <div id="overlay">Choose an Uma to start.</div>
+    <div id="recBar"><span>Recording</span><progress id="recProg" value="0" max="1"></progress><span id="recText"></span><button class="b" id="recCancel">Cancel</button></div>
+    <div id="boot"><div>
+      <b>Loading game data</b>
+      <progress id="bootProg" value="0" max="1"></progress>
+      <span class="hint" id="bootText">Starting…</span>
+    </div></div>
+    <div id="setup"><div>
+      <b>Game files not found</b><br>
+      UmaStudio reads the installed game's files. Check that Uma Musume is installed through Steam and has
+      downloaded its data (start it once).
+      <br><br><span class="hint" id="setupError"></span>
+      <br><span class="hint">This continues by itself once the files can be read.</span>
+    </div></div>
+  </div>
+  <div id="player">
+    <button id="play" title="Play / pause (space)">▶</button>
+    <span id="time">0.00s</span>
+    <input type="range" id="scrub" min="0" max="1" step="0.001" value="0" title="Pause anywhere: that frame is your pose">
+    <select id="speed" class="field" title="Speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select>
+  </div>
+</main>
+
+<aside class="area side">
+  <div class="pages">
+    <div class="page" data-tab="face">
+      <details class="panel" id="pnlExpr" open>
+        <summary>Expression</summary>
+        <div class="body">
+          <div class="seg" id="faces"></div>
+          <select id="facePreset" class="field" title="Every expression in the game"></select>
+          <label class="prop" title="She looks at the camera: her eyes within the range her face allows, her head up to 30° from the pose">
+            <span>Look at camera</span>
+            <select id="lookCam" class="field"><option value="off">Off</option><option value="eyes">Eyes</option><option value="head">Eyes and head</option></select>
+          </label>
+        </div>
+      </details>
+      <details class="panel" id="pnlParts">
+        <summary>Face parts</summary>
+        <div class="body">
+          <label class="prop"><span>Eyebrows</span><select id="faceBrow" class="field"></select></label>
+          <label class="prop"><span>Eyes</span><select id="faceEye" class="field"></select></label>
+          <label class="prop"><span>Mouth</span><select id="faceMouth" class="field"></select></label>
+          <label class="prop"><span>Iris</span>
+            <select id="eyeCell" class="field"><option value="0">Iris 1</option><option value="1">Iris 2</option><option value="2">Iris 3</option><option value="3">Iris 4</option></select>
+          </label>
+          <label class="num"><input type="range" id="eyeHi" min="0" max="1.5" step="0.05" value="1"><span class="k">Eye shine</span><output></output></label>
+        </div>
+      </details>
+    </div>
+
+    <div class="page" data-tab="props" hidden>
+      <details class="panel" id="pnlProps" open>
+        <summary>Props</summary>
+        <div class="body">
+          <div class="seg" id="addRow">
+            <button class="chip" id="addProp" title="One of the game's hand props">Game prop</button>
+            <button class="chip" id="addCard" title="Your picture as a flat card">Picture card</button>
+            <button class="chip" id="addBox" title="Your picture on every side of a box">Picture box</button>
+          </div>
+          <div class="hint" id="propHint">Give her something to hold. Dropping or pasting a picture adds it as a card.</div>
+          <div id="propList"></div>
+          <div id="propEdit" style="display:none">
+            <label class="prop"><span>Hold in</span>
+              <select id="propAnchor" class="field">
+                <option value="right">Right hand</option><option value="left">Left hand</option><option value="both">Both hands</option>
+                <option value="head">Head</option><option value="chest">Chest</option><option value="floor">Floor</option>
+              </select>
+            </label>
+            <div class="prop"><span>Picture</span>
+              <div class="picRow"><span class="val" id="propPicName"></span><button class="b" id="propPic">Choose…</button><button class="mini" id="propPicClear" title="Back to the prop's own look">✕</button></div>
+            </div>
+            <div class="prop" id="propFitRow"><span>Picture goes</span>
+              <div class="seg" id="propFit"><button class="chip" data-fit="sides" title="The whole picture on each side">Every side</button><button class="chip" data-fit="uv" title="Wrapped the way the prop's own texture is">Like texture</button></div>
+            </div>
+            <button class="b" id="propTurn">Turn picture 90°</button>
+            <label class="num" id="propScaleRow"><input type="range" id="propScale" min="0.2" max="3" step="0.01" value="1" data-unit="×"><span class="k">Size</span><output></output></label>
+            <label class="num" id="propCardRow"><input type="range" id="propH" min="0.05" max="1.5" step="0.005" value="0.3" data-unit=" m"><span class="k">Height</span><output></output></label>
+            <div id="propBoxRows">
+              <label class="num"><input type="range" id="propBW" min="0.04" max="1" step="0.005" data-unit=" m"><span class="k">Width</span><output></output></label>
+              <label class="num"><input type="range" id="propBH" min="0.04" max="1" step="0.005" data-unit=" m"><span class="k">Height</span><output></output></label>
+              <label class="num"><input type="range" id="propBD" min="0.04" max="1" step="0.005" data-unit=" m"><span class="k">Depth</span><output></output></label>
+            </div>
+            <label class="check" id="propGripRow"><input type="checkbox" id="propGrip" checked> Close her hand around it</label>
+            <label class="check" id="propToonRow"><input type="checkbox" id="propToon" checked> Toon shading</label>
+            <div class="seg" id="gizmoModes">
+              <button class="chip on" data-mode="translate" title="W">Move</button>
+              <button class="chip" data-mode="rotate" title="E">Rotate</button>
+              <button class="chip" data-mode="scale" title="R">Stretch</button>
+              <button class="chip" id="propReset">Reset</button>
+            </div>
+            <div class="hint">Drag the handles in the view. W / E / R switch handles, Delete removes, Esc lets go.</div>
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="page" data-tab="render" hidden>
+      <details class="panel" id="pnlCamera" open>
+        <summary>Camera</summary>
+        <div class="body">
+          <label class="num"><input type="range" id="fov" min="8" max="60" step="1" value="25" data-unit="°"><span class="k">Lens angle</span><output></output></label>
+        </div>
+      </details>
+      <details class="panel" id="pnlBg" open>
+        <summary>Background</summary>
+        <div class="body">
+          <div class="seg" id="bgs">
+            <button class="chip on" data-bg="">Transparent</button>
+            <button class="chip" data-bg="#ffffff">White</button>
+            <button class="chip" data-bg="#00b140">Green</button>
+            <button class="chip" data-bg="custom">Color</button>
+            <button class="chip" data-bg="picture" title="A game background or your own picture">Picture</button>
+          </div>
+          <input type="color" id="bgColor" value="#88aaff" style="display:none">
+          <div id="bgPicCtl" style="display:none">
+            <div class="picRow"><img id="bgPicThumb" alt=""><span class="val" id="bgPicName"></span><button class="b" id="bgPicChange">Change…</button></div>
+            <label class="num"><input type="range" id="bgZoom" min="1" max="3" step="0.01" value="1" data-unit="×"><span class="k">Zoom</span><output></output></label>
+            <label class="num"><input type="range" id="bgX" min="-1" max="1" step="0.01" value="0"><span class="k">Left / right</span><output></output></label>
+            <label class="num"><input type="range" id="bgY" min="-1" max="1" step="0.01" value="0"><span class="k">Up / down</span><output></output></label>
+            <label class="num"><input type="range" id="bgBlur" min="0" max="16" step="0.5" value="0"><span class="k">Blur</span><output></output></label>
+          </div>
+        </div>
+      </details>
+      <details class="panel" id="pnlImage" open>
+        <summary>Picture</summary>
+        <div class="body">
+          <div class="seg" id="sizes">
+            <button class="chip on" data-size="1280x720" title="1280 × 720">Thumbnail</button>
+            <button class="chip" data-size="1920x1080" title="1920 × 1080">1080p</button>
+            <button class="chip" data-size="3840x2160" title="3840 × 2160">4K</button>
+            <button class="chip" data-size="2048x2048" title="2048 × 2048">Square</button>
+            <button class="chip" data-size="1080x1920" title="1080 × 1920">Vertical</button>
+          </div>
+          <label class="check"><input type="checkbox" id="ssaa" checked> Smoother edges</label>
+          <label class="check"><input type="checkbox" id="crop"> Crop to the character</label>
+          <button class="big" id="render">Save PNG</button>
+        </div>
+      </details>
+      <details class="panel" id="pnlVideo" open>
+        <summary>Video</summary>
+        <div class="body">
+          <div class="seg" id="vidLen">
+            <button class="chip on" data-len="loop" title="The whole pose, once">Full pose</button>
+            <button class="chip" data-len="3">3 s</button>
+            <button class="chip" data-len="5">5 s</button>
+            <button class="chip" data-len="10">10 s</button>
+          </div>
+          <div class="seg" id="vidFmt">
+            <button class="chip on" data-fmt="mp4" title="Plays everywhere. Uses your background (black if transparent).">MP4</button>
+            <button class="chip" data-fmt="webm" title="Transparent background, for OBS and browsers">WebM (transparent)</button>
+            <button class="chip" data-fmt="mov" title="Transparent ProRes 4444, for Premiere, DaVinci, After Effects">MOV (editing)</button>
+            <button class="chip" data-fmt="gif">GIF</button>
+          </div>
+          <div class="seg" id="vidFps">
+            <button class="chip" data-fps="30">30 fps</button>
+            <button class="chip on" data-fps="60">60 fps</button>
+          </div>
+          <button class="big" id="record">Record video</button>
+          <button class="b" id="openRenders">Open saved files</button>
+        </div>
+      </details>
+    </div>
+
+    <div class="page" data-tab="look" hidden>
+      <details class="panel" id="pnlLight" open>
+        <summary>Light</summary>
+        <div class="body">
+          <label class="num"><input type="range" id="lightAz" min="-180" max="180" step="1" value="-35" data-unit="°"><span class="k">Direction</span><output></output></label>
+          <label class="num"><input type="range" id="lightEl" min="-30" max="85" step="1" value="35" data-unit="°"><span class="k">Height</span><output></output></label>
+          <label class="check"><input type="checkbox" id="lightFollow" checked> Follows the camera</label>
+          <label class="num"><input type="range" id="toonStep" min="0" max="1" step="0.01" value="0.4"><span class="k">Shadow size</span><output></output></label>
+          <label class="num"><input type="range" id="bright" min="0.5" max="1.5" step="0.01" value="1"><span class="k">Brightness</span><output></output></label>
+          <label class="num"><input type="range" id="rim" min="0" max="2" step="0.01" value="1"><span class="k">Rim light</span><output></output></label>
+        </div>
+      </details>
+      <details class="panel" id="pnlStyle" open>
+        <summary>Style</summary>
+        <div class="body">
+          <label class="check"><input type="checkbox" id="physics" checked> Hair &amp; cloth physics</label>          <label class="check"><input type="checkbox" id="outline" checked> Outlines</label>
+          <label class="num"><input type="range" id="outlineW" min="0" max="3" step="0.05" value="1" data-unit="×"><span class="k">Outline width</span><output></output></label>
+        </div>
+      </details>
+    </div>
+  </div>
+  <nav class="tabs">
+    <button data-tab="face">Face</button>
+    <button data-tab="props">Props</button>
+    <button data-tab="render">Render</button>
+    <button data-tab="look">Look</button>
+  </nav>
+</aside>
+
+<footer>
+  <span id="statusMsg"></span>
+  <span class="spacer"></span>
+  <span id="busy"><i></i><span></span></span>
+  <span id="warm"></span>
+  <span id="status"></span>
+</footer>
+
+<div id="picker" class="modal"><div class="box">
+  <div class="top"><h2>Choose an Uma</h2><input type="search" id="umaFilter" placeholder="Search by name"><button class="b close" id="pickerClose">Close</button></div>
+  <div id="umaGrid" class="grid"></div>
+</div></div>
+
+<div id="propPicker" class="modal"><div class="box">
+  <div class="top"><h2>Choose a prop</h2><input type="search" id="propFilter" placeholder="Search by number"><button class="b close" id="propPickerClose">Close</button></div>
+  <div id="propGrid" class="grid"></div>
+  <div class="foot hint">The game's hand props.</div>
+</div></div>
+
+<div id="imgPicker" class="modal"><div class="box">
+  <div class="top">
+    <h2 id="imgTitle">Choose a picture</h2>
+    <div class="seg" id="imgTabs">
+      <button class="chip" data-tab="mine">Your pictures</button>
+      <button class="chip" data-tab="bg">Game backgrounds</button>
+      <button class="chip" data-tab="vbg">Vertical backgrounds</button>
+    </div>
+    <input type="search" id="imgFilter" placeholder="Search">
+    <button class="b" id="imgFolder">Open folder</button>
+    <button class="b close" id="imgClose">Close</button>
+  </div>
+  <div id="imgGrid" class="grid"></div>
+  <div class="foot hint">Drop pictures anywhere on this window or paste one with Ctrl+V. They are kept in Pictures\UmaStudio\images.</div>
+</div></div>
+<input type="file" id="imgFile" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+
+<script type="module" src="/static/viewer.js"></script>
+</body>
+</html>

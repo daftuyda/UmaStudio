@@ -1,0 +1,4 @@
+UnityPy>=1.25
+numpy
+Pillow
+pywebview>=5
