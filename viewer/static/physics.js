@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { post } from '/static/ui.js';
+import { SurfaceCollision } from '/static/surface-collision.js';
 
 // hair, ears, bust and tail, simulated by the game's own CySpring plugin on the server (cyspring.py).
 // every 60 Hz tick the pose goes over (relative to the character root, in unity's axes) and each
@@ -46,15 +47,17 @@ export class GameSprings {
     this.acc = 0;
     this.pendingReset = true;
     this.dead = false;
+    this.surface = new SurfaceCollision(root, info.contacts || []);
   }
 
   get count() { return this.bones.length; }
 
   /** Start over from the current pose (new clip, a jump in time): the game's reset + warm-up. */
-  reset() { this.pendingReset = true; this.acc = 0; }
+  reset() { this.surface.reset(); this.pendingReset = true; this.acc = 0; }
 
   /** Physics off: the spring bones back to rest. */
   setEnabled(on) {
+    this.surface.reset();
     this.enabled = on;
     this.finals.fill(null);
     if (!on) this.bones.forEach((b, i) => b.quaternion.copy(this.restQ[i]));
@@ -68,6 +71,7 @@ export class GameSprings {
   /** `ticks` steps on the current pose (more than one only for warm-up / catching up). */
   async step(ticks = 1) {
     if (!this.enabled || this.dead) return;
+    this.surface.restore();
     const reset = this.pendingReset;
     if (reset) { ticks = WARM_UP; this.pendingReset = false; }
     this.root.updateMatrixWorld(true);
@@ -86,13 +90,14 @@ export class GameSprings {
     this.bones.forEach((b, i) => {
       this.finals[i] = r[5 * i] > 0.5 ? new THREE.Quaternion(r[5 * i + 1], -r[5 * i + 2], -r[5 * i + 3], r[5 * i + 4]) : null;
     });
-    this.apply();
+    this.apply(ticks * TICK);
   }
 
   /** The last results onto the bones (PostSpring): each final rotation is a model-space
    *  rotation, so it is set against the parent's current one. */
-  apply() {
+  apply(dt = TICK) {
     if (!this.enabled) return;
+    this.surface.restore();
     this.root.updateMatrixWorld(true);
     _inv.copy(this.root.matrixWorld).invert();
     const done = new Map();
@@ -104,13 +109,14 @@ export class GameSprings {
       done.set(b, pq.clone().multiply(b.quaternion));
     });
     this.root.updateMatrixWorld(true);
+    this.surface.apply(dt);
   }
 
   /** Live view: a step when one is due (a promise), else the last result kept on. */
   frame(dt) {
     if (!this.enabled || this.dead) return null;
     this.acc = Math.min(this.acc + dt, 4 * TICK);
-    if (this.acc < TICK && !this.pendingReset) { this.apply(); return null; }
+    if (this.acc < TICK && !this.pendingReset) { this.apply(0); return null; }
     const n = Math.max(1, Math.floor(this.acc / TICK));
     this.acc = Math.max(0, this.acc - n * TICK);
     return this.step(n);

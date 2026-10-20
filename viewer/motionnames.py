@@ -10,6 +10,7 @@ import re
 import sqlite3
 
 import gamepaths
+import textlabels
 
 # not poses on their own: additive layers, hand grips, tail-only and helper clips
 NOT_POSES = re.compile(r"(_plus|_ik_add|_tail|_add|plusend)$|^anm_eve_type00_prop\d+")
@@ -81,17 +82,19 @@ TAGS = {
 # --- names from the game's data ------------------------------------------------------------
 
 _names = None
+_names_key = None
 
 
 def game_names():
-    global _names
-    if _names is None:
+    global _names, _names_key
+    key = textlabels.source_key()
+    if _names is None or key != _names_key:
         n = {"chara": {}, "card": {}, "song": {}, "command": {}, "training": {}}
         try:
             db = sqlite3.connect(f"file:{gamepaths.master()}?mode=ro", uri=True)
             try:
                 for key, cat in (("chara", 6), ("card", 5), ("song", 16), ("command", 55)):
-                    n[key] = dict(db.execute("SELECT [index], text FROM text_data WHERE category = ?", (cat,)))
+                    n[key] = textlabels.names(db, cat)
                 for cutin, cmd, base, level in db.execute(
                         "SELECT cutin_file_id, command_id, base_command_id, command_level FROM single_mode_training"):
                     n["training"][cutin] = (n["command"].get(cmd) or n["command"].get(base), level)
@@ -100,6 +103,7 @@ def game_names():
         except sqlite3.Error:
             pass
         _names = n
+        _names_key = textlabels.source_key()
     return _names
 
 
@@ -285,8 +289,16 @@ def group(names, key=lambda n: n, own=None):
         keys = [p[0] for p in s["parts"]]
         default = next((keys.index(k) for k in DEFAULT_PART if k in keys), 0)
         fam, short = family(s["title"])
+        # Numbered shots form a sequence. Start/loop/end sets play one pass of the
+        # loop; still poses, reactions and success/failure alternatives stay separate.
+        sequence = [i for i, k in enumerate(keys) if k and re.fullmatch(r"\d+", k)]
+        if len(sequence) != len(keys):
+            sequence = [keys.index(k) for k in ("s", "loop", "sl", "e") if k in keys]
+            if len(sequence) < 2:
+                sequence = [keys.index(k) for k in ("in", "out") if k in keys]
         out.append({"title": s["title"], "sub": s["sub"], "chara": s["chara"], "family": fam, "name": short, "tags": s["tags"],
-                    "parts": [[label, it] for _, label, it in s["parts"]], "default": default})
+                    "parts": [[label, it] for _, label, it in s["parts"]], "default": default,
+                    "sequence": sequence if len(sequence) > 1 else []})
     # alphabetical, but numbers in number order: "set 2" before "set 2-1" before "set 10"
     out.sort(key=lambda st: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", f"{st['title']} {st['sub']}".lower())])
     return out

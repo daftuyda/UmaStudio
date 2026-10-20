@@ -23,6 +23,19 @@ from UnityPy.helpers.MeshHelper import MeshHandler
 
 # --- small helpers -----------------------------------------------------------
 
+def skin_attributes(indices, weights, vertex_count, bone_count):
+    """Unity can store only one or two influences; glTF requires four slots."""
+    bi = np.asarray(indices, dtype=np.int64).reshape(vertex_count, -1)
+    bw = np.asarray(weights, dtype=np.float32).reshape(vertex_count, -1)
+    if bi.shape != bw.shape or not 1 <= bi.shape[1] <= 4:
+        raise ValueError("Unsupported mesh skin influence layout")
+    padding = ((0, 0), (0, 4 - bi.shape[1]))
+    bi = np.pad(np.clip(bi, 0, bone_count - 1), padding)
+    bw = np.pad(bw, padding)
+    total = bw.sum(axis=1, keepdims=True)
+    total[total == 0] = 1
+    return bi.astype(np.uint16), bw / total
+
 
 def obj_key(reader):
     return (reader.assets_file.name, reader.path_id)
@@ -470,13 +483,8 @@ def write_model(pack, sk, root, out, chara):
                 r = deref(b)
                 bones.append(sk.by_unity.get(obj_key(r), root) if r else root)
             if bones and h.m_BoneIndices and h.m_BoneWeights:
-                bi = np.array(h.m_BoneIndices, dtype=np.int64).reshape(n, 4)
-                bw = np.array(h.m_BoneWeights, dtype=np.float32).reshape(n, 4)
-                bi = np.clip(bi, 0, len(bones) - 1)
-                s = bw.sum(axis=1, keepdims=True)
-                s[s == 0] = 1
-                bw = bw / s
-                attrs["JOINTS_0"] = g.accessor(bi.astype(np.uint16), USHORT, "VEC4", ARRAY_BUFFER)
+                bi, bw = skin_attributes(h.m_BoneIndices, h.m_BoneWeights, n, len(bones))
+                attrs["JOINTS_0"] = g.accessor(bi, USHORT, "VEC4", ARRAY_BUFFER)
                 attrs["WEIGHTS_0"] = g.accessor(bw, FLOAT, "VEC4", ARRAY_BUFFER)
                 ibm = np.stack([conv_matrix(unity_matrix(m)).T for m in mesh_r.read_typetree()["m_BindPose"]])
                 g.doc["skins"].append({"name": name, "joints": bones,
@@ -544,6 +552,9 @@ def convert_prop(files, out):
     reader, t = roots[name]
     root = sk.add_tree(reader, t, None)
     meshes = write_model(pack, sk, root, out, "0000")
+    paths = {zlib.crc32(sk.path(i, root).encode("utf-8")): n["name"] for i, n in enumerate(sk.nodes)}
+    with open(os.path.join(out, "paths.json"), "w", encoding="utf-8") as f:
+        json.dump(paths, f)
     info = {"name": name, "meshes": meshes}
     with open(os.path.join(out, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(info, f)

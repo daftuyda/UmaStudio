@@ -171,10 +171,14 @@ class TransformControls extends Object3D {
 		this._onPointerHover = onPointerHover.bind( this );
 		this._onPointerMove = onPointerMove.bind( this );
 		this._onPointerUp = onPointerUp.bind( this );
+		this._onPointerCancel = () => this.cancelDrag();
 
 		this.domElement.addEventListener( 'pointerdown', this._onPointerDown );
 		this.domElement.addEventListener( 'pointermove', this._onPointerHover );
 		this.domElement.addEventListener( 'pointerup', this._onPointerUp );
+		this.domElement.addEventListener( 'pointercancel', this._onPointerCancel );
+		this.domElement.addEventListener( 'lostpointercapture', this._onPointerCancel );
+		this.domElement.ownerDocument.defaultView?.addEventListener( 'blur', this._onPointerCancel );
 
 	}
 
@@ -555,10 +559,14 @@ class TransformControls extends Object3D {
 
 	dispose() {
 
+		this.cancelDrag();
 		this.domElement.removeEventListener( 'pointerdown', this._onPointerDown );
 		this.domElement.removeEventListener( 'pointermove', this._onPointerHover );
 		this.domElement.removeEventListener( 'pointermove', this._onPointerMove );
 		this.domElement.removeEventListener( 'pointerup', this._onPointerUp );
+		this.domElement.removeEventListener( 'pointercancel', this._onPointerCancel );
+		this.domElement.removeEventListener( 'lostpointercapture', this._onPointerCancel );
+		this.domElement.ownerDocument.defaultView?.removeEventListener( 'blur', this._onPointerCancel );
 
 		this.traverse( function ( child ) {
 
@@ -582,11 +590,22 @@ class TransformControls extends Object3D {
 	// Detach from object
 	detach() {
 
+		this.cancelDrag();
 		this.object = undefined;
 		this.visible = false;
 		this.axis = null;
 
 		return this;
+
+	}
+
+	cancelDrag() {
+
+		const id = this._pointerId;
+		this._pointerId = undefined;
+		this.domElement.removeEventListener( 'pointermove', this._onPointerMove );
+		this.pointerUp( { button: 0 } );
+		if ( id !== undefined && this.domElement.hasPointerCapture( id ) ) this.domElement.releasePointerCapture( id );
 
 	}
 
@@ -670,7 +689,8 @@ function getPointer( event ) {
 		return {
 			x: 0,
 			y: 0,
-			button: event.button
+			button: event.button,
+			shiftKey: event.shiftKey
 		};
 
 	} else {
@@ -680,7 +700,8 @@ function getPointer( event ) {
 		return {
 			x: ( event.clientX - rect.left ) / rect.width * 2 - 1,
 			y: - ( event.clientY - rect.top ) / rect.height * 2 + 1,
-			button: event.button
+			button: event.button,
+			shiftKey: event.shiftKey
 		};
 
 	}
@@ -704,24 +725,21 @@ function onPointerHover( event ) {
 
 function onPointerDown( event ) {
 
-	if ( ! this.enabled ) return;
-
-	if ( ! document.pointerLockElement ) {
-
-		this.domElement.setPointerCapture( event.pointerId );
-
-	}
-
-	this.domElement.addEventListener( 'pointermove', this._onPointerMove );
+	if ( ! this.enabled || event.button !== 0 || this._pointerId !== undefined ) return;
 
 	this.pointerHover( this._getPointer( event ) );
 	this.pointerDown( this._getPointer( event ) );
+	if ( ! this.dragging ) return;
+	this._pointerId = event.pointerId;
+	if ( ! this.domElement.ownerDocument.pointerLockElement ) this.domElement.setPointerCapture( event.pointerId );
+	this.domElement.addEventListener( 'pointermove', this._onPointerMove );
 
 }
 
 function onPointerMove( event ) {
 
-	if ( ! this.enabled ) return;
+	if ( event.pointerId !== this._pointerId ) return;
+	if ( ! this.enabled || ( event.buttons & 1 ) === 0 ) return this.cancelDrag();
 
 	this.pointerMove( this._getPointer( event ) );
 
@@ -729,13 +747,8 @@ function onPointerMove( event ) {
 
 function onPointerUp( event ) {
 
-	if ( ! this.enabled ) return;
-
-	this.domElement.releasePointerCapture( event.pointerId );
-
-	this.domElement.removeEventListener( 'pointermove', this._onPointerMove );
-
-	this.pointerUp( this._getPointer( event ) );
+	if ( event.pointerId !== this._pointerId || event.button !== 0 ) return;
+	this.cancelDrag();
 
 }
 

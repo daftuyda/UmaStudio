@@ -1,0 +1,89 @@
+name: Windows build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build:
+    name: Test and package Windows
+    runs-on: windows-latest
+    timeout-minutes: 25
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.13'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: viewer/requirements.txt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Test, build and package
+        id: build
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: ./viewer/build_exe.ps1 -RunTests -Tag $env:RELEASE_TAG
+      - name: Upload Windows download
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: UmaStudio-${{ steps.build.outputs.version }}-windows
+          path: |
+            viewer/dist/UmaStudio-${{ steps.build.outputs.version }}.zip
+            viewer/dist/UmaStudio-${{ steps.build.outputs.version }}.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  release:
+    name: Publish tagged release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: UmaStudio-${{ needs.build.outputs.version }}-windows
+          path: release
+      - name: Verify download checksum
+        working-directory: release
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: sha256sum --check "UmaStudio-${VERSION}.zip.sha256"
+      - name: Publish release with change summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "release/UmaStudio-${VERSION}.zip" \
+            "release/UmaStudio-${VERSION}.zip.sha256" \
+            --verify-tag \
+            --title "UmaStudio ${VERSION}" \
+            --notes-file "docs/releases/${VERSION}.md"

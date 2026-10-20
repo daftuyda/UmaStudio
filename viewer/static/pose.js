@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { JointControls } from '/static/joint-controls.js';
 import { $, store, toast, typing } from '/static/ui.js';
 
 // pose mode: turn joints by hand on top of whatever the motion does. an edit is a rotation offset
@@ -13,7 +13,7 @@ const BODY = ['Hip', 'Waist', 'Spine', 'Chest', 'Neck', 'Head',
 const FINGERS = SIDES.flatMap(s => ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky'].flatMap(f => [1, 2, 3].map(i => `${f}_0${i}_${s}`)));
 
 const edits = new Map();          // bone name -> offset quaternion, local, after the motion
-const animQ = new Map();          // bone name -> what the motion set this frame (before the offset)
+const applied = new Map();        // restore unedited rotations before the next mixer evaluation
 const undoStack = [];
 let ctx = null, cur = null, tc = null, proxy = null;
 let showing = false, fingers = false, selected = null;
@@ -22,6 +22,12 @@ dots.renderOrder = 999;
 const dotGeo = new THREE.SphereGeometry(1, 12, 8);
 const COLORS = { idle: 0x8db3ef, edited: 0xf0a040, picked: 0xffffff };
 const _q = new THREE.Quaternion(), _v = new THREE.Vector3();
+let drag = null, resumeMotion = null, orbitEnabled = true;
+
+export function beforeAnimation() {
+  for (const [bone, q] of applied) bone.quaternion.copy(q);
+  applied.clear();
+}
 
 function dotMaterial(color) {
   return new THREE.MeshBasicMaterial({ color, depthTest: false, depthWrite: false, transparent: true, opacity: 0.9 });
@@ -46,14 +52,12 @@ function rebuildDots() {
 /** Every frame, right after the motion: the offsets on top of it. */
 export function applyEdits() {
   if (!cur) return;
-  animQ.clear();
   for (const [name, off] of edits) {
     const b = cur.root.getObjectByName(name);
     if (!b) continue;
-    animQ.set(name, b.quaternion.clone());
-    b.quaternion.multiply(off);
+    applied.set(b, b.quaternion.clone());
+    b.quaternion.multiply(off).normalize();
   }
-  if (selected && !animQ.has(selected.name)) animQ.set(selected.name, selected.quaternion.clone());
 }
 
 /** Every frame before drawing: dots on the joints at a steady size, the proxy on the picked bone. */
@@ -81,6 +85,7 @@ export function gizmo(visible) {
 }
 
 function select(b) {
+  tc.cancelDrag();
   selected = b;
   if (b) {
     b.getWorldPosition(proxy.position);
@@ -98,6 +103,8 @@ function remember() {
   if (undoStack.length > 60) undoStack.shift();
 }
 function restore(m) {
+  tc.cancelDrag();
+  beforeAnimation();
   edits.clear();
   m.forEach((q, k) => edits.set(k, q.clone()));
   refreshCount();
@@ -108,15 +115,16 @@ function refreshCount() {
 
 // while dragging: the offset that makes the bone match the proxy, given what the motion set
 function fromProxy() {
-  if (!selected) return;
-  const base = animQ.get(selected.name) || selected.quaternion;
-  selected.parent.getWorldQuaternion(_q).invert().multiply(proxy.quaternion);   // wanted local rotation
-  edits.set(selected.name, base.clone().invert().multiply(_q));
+  if (!selected || !drag) return;
+  // Keep the drag's reference frame fixed even when the parent or animation moves.
+  _q.copy(drag.proxy).invert().multiply(proxy.quaternion);
+  edits.set(selected.name, drag.offset.clone().multiply(_q).normalize());
   refreshCount();
 }
 
 /** A new character: same bone names, so the edits carry over. */
 export function onModel(c) {
+  beforeAnimation();
   cur = c;
   select(null);
   rebuildDots();
@@ -161,24 +169,36 @@ export function initPose(c) {
   ctx.scene.add(dots);
   proxy = new THREE.Object3D();
   ctx.scene.add(proxy);
-  tc = new TransformControls(ctx.camera, ctx.canvas);
+  tc = new JointControls(ctx.camera, ctx.canvas);
   tc.setMode('rotate');
   tc.setSpace('local');
-  tc.setSize(0.6);
+  tc.setSize(0.85);
   tc.addEventListener('dragging-changed', e => {
-    ctx.controls.enabled = !e.value;
-    if (e.value) remember();
+    if (e.value) {
+      remember();
+      orbitEnabled = ctx.controls.enabled;
+      ctx.controls.enabled = false;
+      drag = { proxy: proxy.quaternion.clone(), offset: (edits.get(selected.name) || new THREE.Quaternion()).clone() };
+      resumeMotion = ctx.pauseMotion?.();
+    } else {
+      ctx.controls.enabled = orbitEnabled;
+      drag = null;
+      resumeMotion?.();
+      resumeMotion = null;
+    }
   });
   tc.addEventListener('objectChange', fromProxy);
   ctx.scene.add(tc);
 
   // click a dot to pick its joint; this runs before the props' own click handling
   let down = null;
-  ctx.canvas.addEventListener('pointerdown', e => { down = [e.clientX, e.clientY]; }, true);
+  ctx.canvas.addEventListener('pointerdown', e => { if (e.button === 0) down = [e.clientX, e.clientY, e.pointerId]; }, true);
   ctx.canvas.addEventListener('pointerup', e => {
-    if (!showing || !down || e.button !== 0 || tc.dragging) return;
-    const moved = Math.hypot(e.clientX - down[0], e.clientY - down[1]);
+    if (!down || e.pointerId !== down[2] || e.button !== 0) return;
+    const start = down;
     down = null;
+    if (!showing || tc.dragging) { if (tc.dragging) e.jointHandled = true; return; }
+    const moved = Math.hypot(e.clientX - start[0], e.clientY - start[1]);
     if (moved > 4) return;
     const r = ctx.canvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
     let best = null, bestD = 14;
@@ -189,10 +209,14 @@ export function initPose(c) {
       if (dd < bestD) { bestD = dd; best = d.userData.bone; }
     }
     if (best) {
-      e.stopImmediatePropagation();
+      // Let OrbitControls and both gizmos receive release and clean up their pointer state.
+      e.jointHandled = true;
       select(best);
     } else if (selected && tc.axis === null) select(null);
   }, true);
+  ctx.canvas.addEventListener('pointercancel', () => { down = null; });
+  ctx.canvas.addEventListener('lostpointercapture', () => { down = null; });
+  window.addEventListener('blur', () => { down = null; });
 
   document.addEventListener('keydown', e => {
     if (typing()) return;
@@ -204,8 +228,8 @@ export function initPose(c) {
 
   $('#poseEdit').onchange = () => setShowing($('#poseEdit').checked);
   $('#poseFingers').onchange = () => { fingers = $('#poseFingers').checked; store.set('poseFingers', fingers); if (selected && FINGERS.includes(selected.name) && !fingers) select(null); rebuildDots(); };
-  $('#poseResetJoint').onclick = () => { if (!selected) return; remember(); edits.delete(selected.name); refreshCount(); };
-  $('#poseResetAll').onclick = () => { if (!edits.size) return; remember(); edits.clear(); refreshCount(); };
+  $('#poseResetJoint').onclick = () => { if (!selected) return; tc.cancelDrag(); remember(); beforeAnimation(); edits.delete(selected.name); refreshCount(); cur?.springs?.reset(); };
+  $('#poseResetAll').onclick = () => { if (!edits.size) return; tc.cancelDrag(); remember(); beforeAnimation(); edits.clear(); refreshCount(); cur?.springs?.reset(); };
   $('#poseSaveBtn').onclick = () => {
     const name = $('#poseName').value.trim();
     if (!name) return toast('Give the pose a name first', true);

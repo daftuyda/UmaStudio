@@ -414,6 +414,8 @@ class OrbitControls extends EventDispatcher {
 
 			scope.domElement.removeEventListener( 'pointerdown', onPointerDown );
 			scope.domElement.removeEventListener( 'pointercancel', onPointerUp );
+			scope.domElement.removeEventListener( 'lostpointercapture', cancelPointers );
+			scope.domElement.ownerDocument.defaultView?.removeEventListener( 'blur', cancelPointers );
 			scope.domElement.removeEventListener( 'wheel', onMouseWheel );
 
 			scope.domElement.removeEventListener( 'pointermove', onPointerMove );
@@ -1022,6 +1024,7 @@ class OrbitControls extends EventDispatcher {
 
 		function onPointerMove( event ) {
 
+			if ( event.pointerType !== 'touch' && event.buttons === 0 ) return cancelPointers();
 			if ( scope.enabled === false ) return;
 
 			if ( event.pointerType === 'touch' ) {
@@ -1042,7 +1045,7 @@ class OrbitControls extends EventDispatcher {
 
 			if ( pointers.length === 0 ) {
 
-				scope.domElement.releasePointerCapture( event.pointerId );
+				if ( scope.domElement.hasPointerCapture( event.pointerId ) ) scope.domElement.releasePointerCapture( event.pointerId );
 
 				scope.domElement.removeEventListener( 'pointermove', onPointerMove );
 				scope.domElement.removeEventListener( 'pointerup', onPointerUp );
@@ -1051,6 +1054,13 @@ class OrbitControls extends EventDispatcher {
 
 			scope.dispatchEvent( _endEvent );
 
+			state = STATE.NONE;
+
+		}
+
+		function cancelPointers() {
+
+			for ( const id of pointers.slice() ) onPointerUp( { pointerId: id } );
 			state = STATE.NONE;
 
 		}
@@ -1404,6 +1414,8 @@ class OrbitControls extends EventDispatcher {
 
 		scope.domElement.addEventListener( 'pointerdown', onPointerDown );
 		scope.domElement.addEventListener( 'pointercancel', onPointerUp );
+		scope.domElement.addEventListener( 'lostpointercapture', cancelPointers );
+		scope.domElement.ownerDocument.defaultView?.addEventListener( 'blur', cancelPointers );
 		scope.domElement.addEventListener( 'wheel', onMouseWheel, { passive: false } );
 
 		// force an update at start

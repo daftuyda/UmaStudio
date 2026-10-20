@@ -4,10 +4,14 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { GameSprings, TICK } from '/static/physics.js';
 import { U, kindOf, makeMaterial, makeOutline } from '/static/look.js';
-import { $, $$, call, post, getJson, toast, radio, store, busy, initChrome } from '/static/ui.js';
+import { $, $$, call, post, getJson, toast, radio, store, busy, initChrome, setGameSource } from '/static/ui.js';
 import { pickImage, pictureName } from '/static/images.js';
 import * as props from '/static/props.js';
 import * as pose from '/static/pose.js';
+import { initSettings } from '/static/settings.js';
+import { stitchClips, segmentAt, animatedFace } from '/static/sequence.js';
+import { AnimationCamera } from '/static/animation-camera.js';
+import { LoadCache, mapLimited } from '/static/loading.js';
 
 // --- renderer -----------------------------------------------------------------
 
@@ -27,6 +31,7 @@ const controls = new OrbitControls(camera, canvas);
 controls.target.set(0, 0.85, 0);
 controls.enableDamping = true;
 controls.update();
+const animationCamera = new AnimationCamera(camera, controls);
 
 function resize() {
   const w = stage.clientWidth, h = stage.clientHeight;
@@ -44,11 +49,16 @@ let charas = [];
 const shot = { cam: 'full', bg: store.get('bg', ''), size: store.get('size', '1280x720') };
 const video = { len: 'loop', fmt: store.get('vidFmt', 'mp4'), fps: store.get('vidFps', 60) };
 let recording = null;        // { cancel } while a video is being made
+let gameRegion = 'global';
+initSettings(() => !recording);
 
 // --- choosing an Uma --------------------------------------------------------------------
 
 async function start() {
   const s = await getJson('/api/status', null);
+  gameRegion = s.region || 'global';
+  if (s.source) setGameSource(s.source);
+  $('#settingsBtn').textContent = `Settings · ${gameRegion === 'jp' ? 'JP' : 'Global'}`;
   $('#status').textContent = s.version ? 'v' + s.version : '';
   if (s.loading) {
     // the server is still loading its modules and the game's file list
@@ -71,7 +81,7 @@ async function start() {
   $('#setup').style.display = 'none';
   charas = (await getJson('/api/charas')).charas;
   fillUmas();
-  const last = store.get('last', null);
+  const last = store.get('last.' + gameRegion, gameRegion === 'global' ? store.get('last', null) : null);
   const c = charas.find(x => x.id === (+new URLSearchParams(location.search).get('uma') || (last && last.chara)));
   if (c) await chooseUma(c, last && last.chara === c.id ? last.dress : null);
   else openPicker();
@@ -85,7 +95,7 @@ async function useGamePath(path) {
   picking = true;
   try {
     await post('/api/game/path', { path }, null);
-    $('#setupError').textContent = 'Reading the game files…';
+    location.reload();
   } catch (e) {
     $('#setupError').textContent = e.message;
   }
@@ -156,21 +166,27 @@ async function chooseUma(c, dressId) {
   await openUma(c, d);
 }
 
+let modelRequest = 0;
 async function openUma(c, d) {
+  const request = ++modelRequest;
+  ++playRequest;
   $('#umaOutfit').textContent = d.name;
   $('#overlay').textContent = `Loading ${c.name}…`;
   $('#overlay').style.display = 'flex';
   try {
     const r = await post('/api/load', { chara: c.id, dress: d.id }, `Loading ${c.name}…`);
-    await busy(`Loading ${c.name}…`, loadModel(r.pack, r.manifest, r.sets, c, d));
-    store.set('last', { chara: c.id, dress: d.id });
+    if (request !== modelRequest) return;
+    await busy(`Loading ${c.name}…`, loadModel(r.pack, r.manifest, r.sets, c, d, request));
+    if (request !== modelRequest) return;
+    store.set('last.' + gameRegion, { chara: c.id, dress: d.id });
   } catch (e) {
+    if (request !== modelRequest) return;
     $('#overlay').textContent = '';
     toast(e.message, true);
   }
 }
 
-async function loadModel(pack, manifest, sets, chara, dress) {
+async function loadModel(pack, manifest, sets, chara, dress, request) {
   const base = `/data/${encodeURIComponent(pack)}/`;
   const gltf = await new GLTFLoader().loadAsync(base + 'model.gltf');
 
@@ -189,6 +205,7 @@ async function loadModel(pack, manifest, sets, chara, dress) {
 
   const meshes = [];
   gltf.scene.traverse(o => { if (o.isMesh) meshes.push(o); });
+  await Promise.all(meshes.flatMap(mesh => Object.values(mesh.material.userData?.textures || {}).map(getTex)));
   const miniParts = {};
   const outlines = [];
   for (const mesh of meshes) {
@@ -198,6 +215,7 @@ async function loadModel(pack, manifest, sets, chara, dress) {
     for (const [slot, idx] of Object.entries(ud.textures || {})) tex[slot] = await getTex(idx);
     mesh.material.dispose();
     mesh.material = makeMaterial(kind, ud, tex);
+    mesh.userData.collisionBody = kind === 'body';
     mesh.frustumCulled = false;
     if (kind === 'tear') mesh.visible = false;
     // eyes and brows show through the bangs, like in the game: they mark the stencil and hair
@@ -223,6 +241,11 @@ async function loadModel(pack, manifest, sets, chara, dress) {
     }
   }
 
+  if (request !== modelRequest) {
+    gltf.scene.traverse(o => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
+    for (const texture of await Promise.all(texCache.values())) texture.dispose();
+    return;
+  }
   if (current) {
     scene.remove(current.root);
     current.root.traverse(o => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
@@ -237,6 +260,8 @@ async function loadModel(pack, manifest, sets, chara, dress) {
   current.mixer.timeScale = parseFloat($('#speed').value);
   props.onModel(current);
   pose.onModel(current);
+  $('#physics').disabled = !manifest.physics;
+  $('#physicsNote').hidden = true;
   if (manifest.physics) {
     // set up while every bone is at rest, like the game binds its springs
     const mine = current;
@@ -244,12 +269,21 @@ async function loadModel(pack, manifest, sets, chara, dress) {
       if (current !== mine || !sp) return;
       mine.springs = sp;
       sp.setEnabled($('#physics').checked);
-    }).catch(e => toast('Physics: ' + e.message, true));
+      sp.surface.enabled = $('#bodyCollision').checked;
+      sp.surface.margin = Number($('#collisionMargin').value) / 1000;
+    }).catch(e => {
+      if (current !== mine) return;
+      $('#physics').disabled = true;
+      $('#physicsNote').textContent = e.message;
+      $('#physicsNote').hidden = false;
+      toast('Hair and cloth simulation is unavailable for this installation.', true);
+    });
   }
   current.process = bindProcess(manifest.process || []);
   outlines.forEach(o => { o.visible = $('#outline').checked; });
   $('#overlay').style.display = 'none';
   await loadFace();
+  if (request !== modelRequest) return;
   setCamera(shot.cam);
   fillPoses();
   // chibis pose from the chibi motions, everyone else not
@@ -372,6 +406,7 @@ function renderTree(list, getClip, openAll) {
   $('#poses .row.on')?.scrollIntoView({ block: 'center' });
 }
 
+let playRequest = 0;
 function setRow(st, getClip, depth, top) {
   const row = document.createElement('div');
   row.className = 'row set';
@@ -379,20 +414,34 @@ function setRow(st, getClip, depth, top) {
   row.style.setProperty('--depth', depth);
   row.st = st;
   row.keys = st.parts.map(([, k]) => k);
+  row.sequenceKey = st.sequence?.length > 1 ? 'sequence:' + row.keys[0] : null;
+  if (row.sequenceKey) row.keys.push(row.sequenceKey);
   row.innerHTML = '<i class="tw"></i><span class="t"></span><small></small>';
   row.querySelector('.t').textContent = top ? st.title : (st.name || st.sub || st.title);
   row.querySelector('small').textContent = top || st.name ? st.sub : '';
   row.title = st.sub ? `${st.title} · ${st.sub}` : st.title;
   row.play = async (label, key) => {
     if (!current) return openPicker();
+    const mine = current, request = ++playRequest;
     row.classList.add('loading');
     try {
-      const clip = await busy('Loading pose…', getClip(key));
+      const clip = await busy('Loading pose…', key === row.sequenceKey ? (async () => {
+        // Overlap transfers and cached reads, with bounded foreground requests.
+        const parts = await mapLimited(st.sequence, 3, async i => {
+          if (current !== mine || request !== playRequest) return null;
+          const [label, partKey] = st.parts[i];
+          const part = await getClip(partKey);
+          return { label, key: partKey, clip: part };
+        });
+        if (current !== mine || request !== playRequest) return null;
+        return stitchClips(parts, mine.rest);
+      })() : getClip(key));
+      if (!clip || current !== mine || request !== playRequest) return;
       await playClip(clip, key, true, st.parts.length > 1 ? `${st.title} (${label})` : st.title);
     } catch (e) { toast(e.message, true); }
     finally { row.classList.remove('loading'); }
   };
-  row.onclick = () => row.play(...st.parts[st.default]);
+  row.onclick = () => row.sequenceKey ? row.play('Play all', row.sequenceKey) : row.play(...st.parts[st.default]);
   row.onkeydown = e => { if (e.key === 'Enter') row.onclick(); };
   return row;
 }
@@ -408,8 +457,9 @@ function markPose(row) {
     pr.style.setProperty('--depth', +row.style.getPropertyValue('--depth') + 1);
     const seg = document.createElement('div');
     seg.className = 'seg';
-    seg.style.setProperty('--cols', Math.min(row.st.parts.length, 4));
-    for (const [label, key] of row.st.parts) {
+    const buttons = row.sequenceKey ? [['Play all', row.sequenceKey], ...row.st.parts] : row.st.parts;
+    seg.style.setProperty('--cols', Math.min(buttons.length, 4));
+    for (const [label, key] of buttons) {
       const b = document.createElement('button');
       b.className = 'chip';
       b.dataset.key = key;
@@ -424,7 +474,8 @@ function markPose(row) {
     row.partsRow.remove();
     row.partsRow = null;
   }
-  row.partsRow?.querySelectorAll('.chip').forEach(b => b.classList.toggle('on', b.dataset.key === poseKey));
+  const active = current?.action && segmentAt(current.action.getClip(), current.action.time)?.key;
+  row.partsRow?.querySelectorAll('.chip').forEach(b => b.classList.toggle('on', b.dataset.key === poseKey || (on && b.dataset.key === active)));
 }
 
 let poseTimer;
@@ -445,10 +496,27 @@ function buildClip(m) {
   return new THREE.AnimationClip(m.name, m.duration, tracks);
 }
 
+const motionCache = new LoadCache(64);
+const companionCache = new LoadCache(96);
 async function ownClip(name) {
-  if (current.clips.has(name)) return current.clips.get(name);
-  const clip = buildClip(await getJson(`${current.base}motions/${encodeURIComponent(name)}.json`, null));
-  current.clips.set(name, clip);
+  const mine = current;
+  return motionCache.get(`${gameRegion}:${mine.base}:${name}`, async () => {
+    const [data, companions] = await Promise.all([
+      getJson(`${mine.base}motions/${encodeURIComponent(name)}.json`, null), getCompanions(name),
+    ]);
+    return attachCompanions(buildClip(data), companions, name);
+  });
+}
+
+function getCompanions(path) {
+  return companionCache.get(`${gameRegion}:${path}`, () => getJson('/api/animation/companions?path=' + encodeURIComponent(path), null));
+}
+
+function attachCompanions(clip, data, path) {
+  clip.faceMotion = data.face;
+  clip.cameraMotion = data.camera;
+  clip.propSetup = data.props || [];
+  clip.sourcePath = path;
   return clip;
 }
 
@@ -465,37 +533,51 @@ function toOrigin(m) {
 }
 
 async function libraryClip(path) {
-  if (current.clips.has(path)) return current.clips.get(path);
-  const r = await getJson('/api/library/clip?path=' + encodeURIComponent(path), null);
-  if (!r.clips.length) throw new Error('that pose has no usable motion');
-  if (path.startsWith('3d/motion/live/')) toOrigin(r.clips[0]);
-  const clip = buildClip(r.clips[0]);
-  current.clips.set(path, clip);
-  return clip;
+  return motionCache.get(`${gameRegion}:${path}`, async () => {
+    const [r, companions] = await Promise.all([
+      getJson('/api/library/clip?path=' + encodeURIComponent(path), null), getCompanions(path),
+    ]);
+    if (!r.clips.length) throw new Error('that pose has no usable motion');
+    if (path.startsWith('3d/motion/live/')) toOrigin(r.clips[0]);
+    return attachCompanions(buildClip(r.clips[0]), companions, path);
+  });
+}
+
+function updateMotion(dt) {
+  pose.beforeAnimation();
+  current.mixer.update(dt);
 }
 
 function restPose() {
+  pose.beforeAnimation();
   current.mixer.stopAllAction();
   current.action = null;
   for (const [o, [p, q, s]] of current.rest) { o.position.copy(p); o.quaternion.copy(q); o.scale.copy(s); }
   current.springs?.reset();
 }
 
+let activationRequest = 0;
 async function playClip(clip, key, autoplay, title) {
+  const request = ++activationRequest, model = current;
+  await props.prepareAnimation(clip, key);
+  if (request !== activationRequest || current !== model) return;
   restPose();
   const a = current.mixer.clipAction(clip);
   a.reset();
   a.setLoop(THREE.LoopRepeat, Infinity);
   a.play();
   current.action = a;
+  current.activeSegment = null;
   current.springs?.reset();
   poseKey = key;
   poseTitle = title || poseTitle;
   $$('#poses .row.set').forEach(markPose);
   $('#scrub').max = clip.duration;
   setPlaying(!!autoplay);
-  current.mixer.update(0);
+  updateMotion(0);
   props.applyGrips();
+  updateTime();
+  applyAnimationCamera();
 }
 
 let playing = false;
@@ -506,17 +588,29 @@ function setPlaying(p) {
 }
 function updateTime() {
   const t = current && current.action ? current.action.time : 0;
+  const segment = current?.action && segmentAt(current.action.getClip(), t);
+  if (current && current.activeSegment !== segment) {
+    current.activeSegment = segment;
+    current.springs?.reset();
+    props.applyGrips();
+    $$('#poses .row.set').forEach(markPose);
+  }
   $('#time').textContent = t.toFixed(2) + 's';
+  $('#time').title = segment ? segment.label : '';
   if (document.activeElement !== $('#scrub')) $('#scrub').value = t;
+  const clip = segment?.clip || current?.action?.getClip();
+  $('#animationFaceNote').textContent = !$('#animationFace').checked ? 'Manual expression.' :
+    clip?.faceMotion?.tracks.length ? 'Following the pose’s facial animation.' : 'No matching face clip. Manual expressions are available.';
 }
 $('#play').onclick = () => setPlaying(!playing);
 $('#scrub').oninput = () => {
   if (!current || !current.action) return;
   setPlaying(false);
   current.action.time = parseFloat($('#scrub').value);
-  current.mixer.update(0);
+  updateMotion(0);
   current.springs?.reset();
   updateTime();
+  applyAnimationCamera();
 };
 $('#speed').onchange = () => { if (current) current.mixer.timeScale = parseFloat($('#speed').value); };
 document.addEventListener('keydown', e => {
@@ -569,7 +663,7 @@ function setupMiniFace() {
     if (!have.has(label)) continue;
     const b = document.createElement('button');
     b.className = 'chip'; b.dataset.face = label; b.textContent = text;
-    b.onclick = () => setFace(label);
+    b.onclick = () => { $('#animationFace').checked = false; setFace(label); updateTime(); };
     chips.appendChild(b);
   }
   const sel = $('#facePreset');
@@ -640,7 +734,10 @@ function setFace(label) {
   $('#faceEye').value = main(faceState.eye_l);
   $('#faceMouth').value = main(faceState.mouth);
 }
-$('#facePreset').onchange = () => { if ($('#facePreset').value) setFace($('#facePreset').value); };
+$('#facePreset').onchange = () => { if ($('#facePreset').value) { $('#animationFace').checked = false; setFace($('#facePreset').value); updateTime(); } };
+$('#animationFace').onchange = () => { applyFace(); updateTime(); };
+for (const id of ['faceBrow', 'faceEye', 'faceMouth'])
+  $('#' + id).addEventListener('change', () => { $('#animationFace').checked = false; updateTime(); });
 const miniPick = (keys, v) => { keys.forEach(k => { mini.st[k] = +v; }); radio('#faces .chip', null); applyMiniFace(); };
 $('#faceBrow').onchange = () => { if (mini) return miniPick(['brow_l', 'brow_r'], $('#faceBrow').value); faceState.eyebrow_l = faceState.eyebrow_r = $('#faceBrow').value; radio('#faces .chip', null); };
 $('#faceEye').onchange = () => { if (mini) return miniPick(['eye_l', 'eye_r'], $('#faceEye').value); faceState.eye_l = faceState.eye_r = $('#faceEye').value; radio('#faces .chip', null); };
@@ -649,11 +746,14 @@ $('#faceMouth').onchange = () => { if (mini) return miniPick(['mouth'], $('#face
 const _fq = new THREE.Quaternion(), _fe = new THREE.Euler();
 function applyFace() {
   if (!face || !faceBones) return;
+  const motion = $('#animationFace').checked && current?.action ?
+    animatedFace(current.action.getClip(), current.action.time) : null;
   for (const part of ['eye', 'eyebrow', 'mouth']) {
     const def = face[part];
     def.groups.forEach((g, gi) => {
       const key = part === 'mouth' ? 'mouth' : part + '_' + (g.side === 'L' ? 'l' : 'r');
-      const mix = parseParts(faceState[key]).map(([n, w]) => [def.names.indexOf(n), w]).filter(([i]) => i > 0);
+      const mix = (motion ? motion[key] : parseParts(faceState[key]))
+        .map(([n, w]) => [def.names.indexOf(n), w]).filter(([i]) => i > 0);
       const base = g.shapes[0], bones = faceBones[part][gi];
       for (let b = 0; b < g.bones.length; b++) {
         const o = bones[b];
@@ -836,6 +936,7 @@ function bonePos(name, fallback) {
 }
 
 function setCamera(preset) {
+  animationCamera.restore();
   shot.cam = preset;
   radio('#cams .chip', $(`#cams .chip[data-cam="${preset}"]`));
   if (!current) return;
@@ -865,9 +966,12 @@ function setCamera(preset) {
   camera.position.copy(target).add(dir.multiplyScalar(dist));
   controls.update();
   follow.at = followPoint();
+  applyAnimationCamera();
 }
 $$('#cams .chip').forEach(b => {
   b.onclick = () => {
+    $('#animationCamera').checked = false;
+    store.set('animationCamera', false);
     // a preset also follows what it frames, unless following is off
     if ($('#follow').value !== 'off') setFollow({ full: 'body', upper: 'chest', face: 'head' }[b.dataset.cam]);
     setCamera(b.dataset.cam);
@@ -921,6 +1025,22 @@ $('#fov').oninput = () => {
   camera.updateProjectionMatrix();
 };
 
+function applyAnimationCamera() {
+  const g = guideRect(), wasActive = !!animationCamera.saved;
+  const active = animationCamera.apply(current, $('#animationCamera').checked, g.H / g.h);
+  $('#follow').disabled = $('#fov').disabled = active;
+  const status = $('#animationCameraStatus');
+  status.hidden = !$('#animationCamera').checked || active;
+  status.textContent = 'No camera track';
+  if (wasActive !== active) { follow.at = followPoint(); follow.root = null; }
+  return active;
+}
+$('#animationCamera').checked = store.get('animationCamera', false);
+$('#animationCamera').onchange = () => {
+  store.set('animationCamera', $('#animationCamera').checked);
+  applyAnimationCamera();
+};
+
 // --- look -------------------------------------------------------------------------------------
 
 function updateLight() {
@@ -941,6 +1061,17 @@ $('#outline').onchange = () => {
 $('#eyeCell').onchange = () => U.eyeCell.value.set(+$('#eyeCell').value, 0);
 $('#eyeHi').oninput = () => { U.eyeHi.value = parseFloat($('#eyeHi').value); };
 $('#physics').onchange = () => current?.springs?.setEnabled($('#physics').checked);
+$('#bodyCollision').checked = store.get('bodyCollision', true);
+$('#collisionMargin').value = store.get('collisionMargin', 3);
+$('#bodyCollision').onchange = () => {
+  store.set('bodyCollision', $('#bodyCollision').checked);
+  if (current?.springs) { current.springs.surface.enabled = $('#bodyCollision').checked; current.springs.reset(); }
+};
+$('#collisionMargin').oninput = () => {
+  store.set('collisionMargin', Number($('#collisionMargin').value));
+  if (current?.springs) current.springs.surface.margin = Number($('#collisionMargin').value) / 1000;
+};
+$('#collisionMargin').dispatchEvent(new Event('input'));
 
 /** The color to clear to, 'picture', or '' for transparent. */
 function background() {
@@ -1103,6 +1234,8 @@ $('#sizeW').onchange = $('#sizeH').onchange = () => useSize(customSize(), true);
 
 /** Render what is inside the guide at (w x h) * ss. Returns straight-alpha RGBA, rows top-down. */
 function renderFrame(w, h, ss = 1) {
+  applyAnimationCamera();
+  props.updateProps();
   const RW = w * ss, RH = h * ss;
   const g = guideRect();
   const savedAspect = camera.aspect;
@@ -1240,11 +1373,12 @@ async function recordVideo() {
   const start = video.len === 'loop' ? 0 : current.action.time;
   const step = 1 / fps;
   // following moves the camera along the video, the view gets its own camera back after
-  const view = { pos: camera.position.clone(), target: controls.target.clone(), at: follow.at?.clone(), root: follow.root };
+  const view = { pos: camera.position.clone(), rotation: camera.quaternion.clone(), fov: camera.fov,
+                 target: controls.target.clone(), at: follow.at?.clone(), root: follow.root };
   try {
     // the game steps its physics at 60 Hz, each frame shows the tick nearest its time
     const springs = current.springs?.enabled ? current.springs : null;
-    const poseAt = t => { current.action.time = (start + t) % clip.duration; current.mixer.update(0); applyProcess(); applyFace(); };
+    const poseAt = t => { current.action.time = (start + t) % clip.duration; updateMotion(0); updateTime(); applyProcess(); applyFace(); };
     let ticks = 0;
     if (springs) { springs.reset(); poseAt(0); await springs.step(); }
     for (let i = 0; i < frames; i++) {
@@ -1255,7 +1389,7 @@ async function recordVideo() {
       } else poseAt(i * step);
       current.root.updateMatrixWorld(true);
       const cut = rootJumped();
-      followCamera(step, i === 0 || cut);
+      if (!applyAnimationCamera()) followCamera(step, i === 0 || cut);
       applyHeadTurn(i === 0 ? 0 : step);
       applyEyeTrace(i === 0 ? 0 : step);
       props.updateProps();
@@ -1281,12 +1415,16 @@ async function recordVideo() {
     if (e.message !== 'cancelled') toast(e.message, true);
   } finally {
     camera.position.copy(view.pos);
+    camera.quaternion.copy(view.rotation);
+    camera.fov = view.fov;
+    camera.updateProjectionMatrix();
     controls.target.copy(view.target);
     Object.assign(follow, { at: view.at || null, root: view.root });
     recording = null;
     $('#recBar').style.display = 'none';
     $('#record').disabled = $('#render').disabled = false;
     setPlaying(wasPlaying);
+    applyAnimationCamera();
   }
 }
 $('#record').onclick = () => recordVideo().catch(e => toast(e.message, true));
@@ -1377,7 +1515,7 @@ async function bakeMotion(nodes) {
   const step = 1 / EXPORT_FPS;
   const keys = nodes.map(() => ({ p: [], q: [], s: [] }));
   const springs = current.springs?.enabled ? current.springs : null;
-  const poseAt = t => { current.action.time = t % clip.duration; current.mixer.update(0); applyProcess(); applyFace(); };
+  const poseAt = t => { current.action.time = t % clip.duration; updateMotion(0); applyProcess(); applyFace(); };
   let ticks = 0;
   if (springs) { springs.reset(); poseAt(0); await springs.step(); }
   for (let i = 0; i < frames; i++) {
@@ -1440,7 +1578,7 @@ async function exportModel() {
       });
     }
     const clip = withMotion ? await busy('Baking the motion…', bakeMotion(nodes)) : null;
-    if (current.action) { current.action.time = keepTime; current.mixer.update(0); applyProcess(); applyFace(); }
+    if (current.action) { current.action.time = keepTime; updateMotion(0); applyProcess(); applyFace(); }
     props.updateProps();
     const parents = [current.root.parent, info.group.parent];
     out.add(current.root, info.group);
@@ -1475,22 +1613,22 @@ function draw() {
 renderer.setAnimationLoop(() => {
   if (recording || stepping) return;   // the recorder drives every frame itself
   const dt = Math.min(clock.getDelta(), 0.1);
-  controls.update();
+  if (!animationCamera.saved) controls.update();
   let tick = null;
   if (current) {
     // the motion (re-evaluated even when paused), the face, the camera after her, then the springs
     // on that pose. they keep running while paused, like in the game.
-    current.mixer.update(playing ? dt : 0);
+    updateMotion(playing ? dt : 0);
     applyProcess();
     applyFace();
     current.root.updateMatrixWorld(true);
     const cut = rootJumped();
     if (cut) current.springs?.reset();
-    followCamera(dt, cut);
+    if (!applyAnimationCamera()) followCamera(dt, cut);
     applyHeadTurn(dt);
     applyEyeTrace(dt);
-    tick = current.springs?.frame(dt);
     updateTime();
+    tick = current.springs?.frame(dt);
   }
   if (!tick) return draw();
   stepping = true;
@@ -1518,14 +1656,12 @@ async function followWarmUp() {
     $('#warm').textContent = w?.total ? `Getting ${w.stage.toLowerCase()} ready · ${w.done} / ${w.total}` : '';
     await new Promise(r => setTimeout(r, 1500));
   }
-  await props.warmThumbs((done, total) => {
-    $('#warm').textContent = done < total ? `Drawing prop previews · ${done} / ${total}` : '';
-  });
+  // Prop thumbnails are drawn only for visible picker tiles.
   $('#warm').textContent = '';
 }
 
-pose.initPose({ scene, camera, canvas, controls, onPick: () => props.propsDebug.select(null) });
-props.initProps({ scene, camera, renderer, controls, canvas, current: () => current, libraryClip,
+pose.initPose({ scene, camera, canvas, controls, pauseMotion: () => { const resume = playing; setPlaying(false); return () => setPlaying(resume); }, onPick: () => props.propsDebug.select(null) });
+props.initProps({ scene, camera, renderer, controls, canvas, current: () => current, libraryClip, buildClip, updateMotion,
                   idle: () => !!current && !recording && !pointerHeld });
 
 window.studio = { scene, camera, controls, setCamera, setFace, savePNG, recordVideo, exportModel, chooseUma, get charas() { return charas; },

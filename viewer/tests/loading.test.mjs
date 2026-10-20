@@ -1,0 +1,52 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { SourceTextModule } from 'node:vm';
+
+async function mod(path, link = () => { throw new Error('Unexpected import'); }) {
+  const m = new SourceTextModule(await readFile(new URL(path, import.meta.url), 'utf8'));
+  await m.link(link);
+  await m.evaluate();
+  return m;
+}
+const loading = (await mod('../static/loading.js')).namespace;
+const cache = new loading.LoadCache(2);
+let calls = 0, release;
+const one = cache.get('one', () => { calls++; return new Promise(r => { release = r; }); });
+assert.equal(cache.get('one', () => { throw new Error('Duplicate work'); }), one);
+await Promise.resolve();
+release(5);
+assert.equal(await one, 5);
+assert.equal(await cache.get('one', () => 6), 5);
+assert.equal(calls, 1);
+await assert.rejects(cache.get('bad', () => { throw new Error('offline'); }));
+assert.equal(await cache.get('bad', () => 7), 7, 'A failed load can be retried');
+await cache.get('three', () => 3);
+assert.equal(await cache.get('one', () => 9), 9, 'Least recently used result is evicted');
+let active = 0, peak = 0;
+const ordered = await loading.mapLimited([4, 1, 3, 2], 2, async n => {
+  peak = Math.max(peak, ++active);
+  await new Promise(r => setTimeout(r, n));
+  active--;
+  return n * 2;
+});
+assert.deepEqual(ordered, [8, 2, 6, 4]);
+assert.equal(peak, 2);
+const three = await mod('../static/vendor/three.module.js');
+const sequence = await mod('../static/sequence.js', () => three);
+const { propPlans, propFrame, setupKey } = (await mod('../static/animation-props.js', () => sequence)).namespace;
+const a = { sourcePath: '3d/motion/a', propSetup: [{ name: 'book' }] };
+const b = { sourcePath: '3d/motion/b', propSetup: [] };
+const clip = { segments: [{ clip: a, start: 0 }, { clip: b, start: 1 }] };
+const plans = propPlans(clip, 'sequence:a', {});
+const tracked = [{ clip: a, setup: { name: 'book', events: [{ time: 0, visible: false }, { time: .5, visible: true }] } }];
+assert.equal(plans.length, 2);
+assert.equal(propFrame(clip, .2, tracked), null);
+assert.equal(propFrame(clip, .7, tracked).name, 'book');
+assert.equal(propFrame(clip, 1.1, tracked), null, 'Hide props absent from the next shot');
+assert.equal(propFrame(clip, .7, tracked).time, .7, 'Seeking backwards restores visibility');
+const custom = propPlans(clip, 'sequence:a', { 'sequence:a': [{ name: 'custom' }] });
+assert.equal(custom.length, 1);
+assert.equal(custom[0].whole, true);
+assert.equal(setupKey('sequence:3d/motion/a'), 'sequence:a');
+assert.equal(propPlans(a, '3d/motion/a', { a: [] })[0].setups.length, 0, 'An explicit empty override is honored');
+console.log('Loading and prop timeline tests passed: request sharing, retry, bounded cache/concurrency, shot visibility and custom overrides.');

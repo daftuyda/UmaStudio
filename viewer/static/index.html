@@ -258,6 +258,16 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
 #setup .pick { display: flex; gap: 6px; margin: 10px 0 6px; }
 #setup .pick input { flex: 1; }
 #setup .where { word-break: break-all; }
+dialog#settings { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 40px);
+  overflow: auto; padding: 20px; color: var(--text); background: var(--panel);
+  border: 1px solid var(--edge); border-radius: 6px; }
+#settings::backdrop { background: rgba(0,0,0,.6); }
+#settings h2 { margin: 0; font-size: 16px; }
+#settings label { display: block; margin: 16px 0 6px; }
+#settings .line input { flex: 1; }
+#settings .resolved { word-break: break-all; user-select: text; margin-top: 6px; }
+#settingsError { color: var(--bad); min-height: 18px; margin: 12px 0; }
+#settingsBtn { margin-left: auto; }
 </style>
 <script type="importmap">
 { "imports": { "three": "/static/vendor/three.module.js", "three/addons/": "/static/vendor/addons/" } }
@@ -271,6 +281,7 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
   </div>
   <button id="umaBtn" title="Choose an Uma"><img id="umaImg" alt=""><div><b id="umaName">Choose an Uma</b><small id="umaOutfit">click to pick</small></div></button>
   <select id="outfit" class="pill" title="Outfit"></select>
+  <button id="settingsBtn" class="b" title="Game region and folders">Settings · Global</button>
 </header>
 
 <aside class="area">
@@ -293,6 +304,8 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
       <option value="off">No follow</option><option value="body">Follow body</option>
       <option value="chest">Follow chest</option><option value="head">Follow head</option>
     </select>
+    <label class="check" title="Use the camera position, angle and zoom supplied with this animation"><input type="checkbox" id="animationCamera"> Animation camera</label>
+    <span class="hint" id="animationCameraStatus" hidden></span>
     <label class="check"><input type="checkbox" id="guide" checked> Frame guide</label>
   </div>
   <div id="stage">
@@ -307,12 +320,12 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
     </div></div>
     <div id="setup"><div>
       <b>Game files not found</b><br>
-      UmaStudio reads the installed game's files. Check that Uma Musume is installed through Steam and has
-      downloaded its data (start it once).
-      <br><br>Or show UmaStudio where it is: the game's install folder (<b>UmamusumePrettyDerby</b>) or its data
+      UmaStudio reads the selected game's files. Start the game once to download its data.
+      <br><button class="b" id="setupSettings">Settings — choose Global or Japan (JP)</button>
+      <br><br>Or show UmaStudio where it is: the game's install folder or its data
       folder, the one with a file called <b>meta</b>.
       <div class="pick">
-        <input class="field" type="text" id="gamePath" placeholder="...\steamapps\common\UmamusumePrettyDerby" spellcheck="false">
+        <input class="field" type="text" id="gamePath" placeholder="Game install or data folder" spellcheck="false">
         <button class="b" id="gameBrowse">Browse…</button>
         <button class="b" id="gameUse">Use</button>
       </div>
@@ -335,6 +348,8 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
       <details class="panel" id="pnlExpr" open>
         <summary>Expression</summary>
         <div class="body">
+          <label class="check"><input type="checkbox" id="animationFace" checked> Follow animation</label>
+          <div class="hint" id="animationFaceNote">Uses the pose's facial animation when available.</div>
           <div class="seg" id="faces"></div>
           <select id="facePreset" class="field" title="Every expression in the game"></select>
           <label class="prop" title="She looks at the camera: her eyes within the range her face allows, her head up to 30° from the pose">
@@ -363,7 +378,7 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
         <div class="body">
           <label class="check"><input type="checkbox" id="poseEdit"> Show joints</label>
           <label class="check"><input type="checkbox" id="poseFingers"> Finger joints</label>
-          <div class="hint">Click a joint in the view and drag its rings to turn it. Changes sit on top of the motion, so pictures, videos and exports keep them. Ctrl+Z undoes.</div>
+          <div class="hint">Click a joint, then hold and drag a ring to turn it. Hold Shift for fine adjustments. Motion pauses while dragging. Changes carry into pictures, videos and exports. Ctrl+Z undoes.</div>
           <div class="prop"><span>Joint</span><span class="val" id="poseJoint">none</span></div>
           <div class="seg" style="--cols:2">
             <button class="chip" id="poseResetJoint">Reset joint</button>
@@ -386,6 +401,12 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
       <details class="panel" id="pnlProps" open>
         <summary>Props</summary>
         <div class="body">
+          <label class="check"><input type="checkbox" id="autoAnimationProps" checked> Load animation props automatically</label>
+          <div class="hint" id="animationPropsNote">Props with supported game links load with the animation.</div>
+          <div class="seg" style="--cols:2">
+            <button class="chip" id="rememberAnimationProps" disabled title="Remember manually added props and their placement for this animation">Remember setup</button>
+            <button class="chip" id="forgetAnimationProps" disabled title="Forget the saved setup and use detected game props">Use detected props</button>
+          </div>
           <div class="seg" id="addRow">
             <button class="chip" id="addProp" title="One of the game's hand props">Game prop</button>
             <button class="chip" id="addCard" title="Your picture as a flat card">Picture card</button>
@@ -525,7 +546,11 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
       <details class="panel" id="pnlStyle" open>
         <summary>Style</summary>
         <div class="body">
-          <label class="check"><input type="checkbox" id="physics" checked> Hair &amp; cloth physics</label>          <label class="check"><input type="checkbox" id="outline" checked> Outlines</label>
+          <label class="check"><input type="checkbox" id="physics" checked> Hair &amp; cloth physics</label>
+          <div class="hint" id="physicsNote" hidden></div>
+          <label class="check"><input type="checkbox" id="bodyCollision" checked> Body &amp; clothing collisions</label>
+          <label class="num"><input type="range" id="collisionMargin" min="0" max="10" step="1" value="3" data-unit=" mm"><span class="k">Collision clearance</span><output></output></label>
+          <label class="check"><input type="checkbox" id="outline" checked> Outlines</label>
           <label class="num"><input type="range" id="outlineW" min="0" max="3" step="0.05" value="1" data-unit="×"><span class="k">Outline width</span><output></output></label>
         </div>
       </details>
@@ -547,6 +572,22 @@ body.dropping::after { content: 'Drop the picture'; position: fixed; inset: 8px;
   <span id="warm"></span>
   <span id="status"></span>
 </footer>
+
+<dialog id="settings" aria-labelledby="settingsTitle">
+  <div class="line"><h2 id="settingsTitle" class="grow">Game settings</h2><button class="b" id="settingsClose" aria-label="Close settings">Close</button></div>
+  <label for="settingsRegion">Game region</label>
+  <select id="settingsRegion" class="field"><option value="global">Global</option><option value="jp">Japan (JP)</option></select>
+  <label for="settingsGame">Install folder</label>
+  <div class="line"><input id="settingsGame" class="field" type="text" placeholder="Detect automatically" spellcheck="false"><button class="b" id="settingsGameBrowse">Browse…</button></div>
+  <div id="settingsGameResolved" class="hint resolved"></div>
+  <label for="settingsData">Downloaded data folder</label>
+  <div class="line"><input id="settingsData" class="field" type="text" placeholder="Detect automatically" spellcheck="false"><button class="b" id="settingsDataBrowse">Browse…</button></div>
+  <div id="settingsDataResolved" class="hint resolved"></div>
+  <p class="hint">The data folder contains <b>meta</b>, <b>master</b> and <b>dat</b>. Leave fields empty for automatic detection. Each region remembers its own folders and keeps its own asset cache.</p>
+  <p class="hint">Applying reloads the viewer and clears the current scene. Save any pictures, poses or videos you want to keep first.</p>
+  <div id="settingsError" role="status" aria-live="polite"></div>
+  <div class="line"><button class="b" id="settingsAuto">Use automatic detection</button><span class="grow"></span><button class="b" id="settingsApply">Apply and reload</button></div>
+</dialog>
 
 <div id="picker" class="modal"><div class="box">
   <div class="top"><h2>Choose an Uma</h2>

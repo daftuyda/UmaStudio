@@ -41,30 +41,64 @@ PARTS = ("head", "body", "tail")
 
 # --- plugin ------------------------------------------------------------------------------
 
-DLL = os.path.join("UmamusumePrettyDerby_Data", "Plugins", "x86_64", "CySpringPlugin.dll")
 _dll = None
+
+
+def reset_plugin():
+    global _dll
+    _dll = None
+
+
+def plugin_path(game):
+    import gamepaths
+    return os.path.join(gamepaths.unity_data_dir(game), "Plugins", "x86_64", "CySpringPlugin.dll")
 
 
 def find_game():
     """The game's install folder (Steam's library list, or the folder the user picked)."""
     import gamepaths
     game = gamepaths.game()
-    return game if game and os.path.exists(os.path.join(game, DLL)) else None
+    return game if game and os.path.exists(plugin_path(game)) else None
 
 
 def plugin():
-    """The game's CySpringPlugin.dll, loaded once."""
+    """Load the selected solver, with Global compatibility support for protected JP builds.
+
+    Only the solver comes from Global; Simulation still receives the selected
+    character's skeleton, spring parameters and collision data.
+    """
+    import gamepaths
     global _dll
     if _dll is None:
         game = find_game()
-        if not game:
-            raise RuntimeError("CySpringPlugin.dll was not found: is the game installed through Steam?")
-        dll = ctypes.CDLL(os.path.join(game, DLL))
-        f = dll.NativeClothUpdate
-        f.restype = None
-        f.argtypes = ([ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p] + [ctypes.c_float] * 7
-                      + [ctypes.c_bool, ctypes.c_float, ctypes.c_bool] + [ctypes.c_float] * 3)
-        _dll = dll
+        candidates = [plugin_path(game)] if game else []
+        if gamepaths.region() == "jp":
+            global_game = gamepaths.paths("global")[0]
+            fallback = plugin_path(global_game) if global_game else None
+            if fallback and fallback not in candidates and os.path.isfile(fallback):
+                candidates.append(fallback)
+        error = None
+        for path in candidates:
+            try:
+                dll = ctypes.CDLL(path)
+                f = dll.NativeClothUpdate
+            except (OSError, AttributeError) as e:
+                error = e
+                continue
+            f.restype = None
+            f.argtypes = ([ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p] + [ctypes.c_float] * 7
+                          + [ctypes.c_bool, ctypes.c_float, ctypes.c_bool] + [ctypes.c_float] * 3)
+            _dll = dll
+            break
+        if _dll is None:
+            if gamepaths.region() == "jp":
+                message = ("Hair and cloth physics needs a compatible game library. In Settings, "
+                           "choose an installed Global game folder, then switch back to Japan (JP). "
+                           "Your JP models and physics data will still be used.")
+            else:
+                message = ("CySpringPlugin.dll could not be loaded. "
+                           "Choose a compatible game's install folder in Settings.")
+            raise RuntimeError(message) from error
     return _dll
 
 
@@ -240,15 +274,22 @@ class Simulation:
                 self.work_nodes.append(node)
             return work_index[node]
 
-        # collision objects per part: head (+ bust as add data), body, tail. the body gives up the
-        # ones the tail's springs use and the tail gets exactly those.
+        # Collision objects per part: head (+ bust as add data), body, tail.
+        # Explicit references can share a collider across several parts.
         made = {}
         cols = {"head": self.make_collisions(head, bust, made), "body": self.make_collisions(body, None, made),
                 "tail": self.make_collisions(tail, None, made)}
         if tail is not None:
             tail_names = collision_names(tail)
-            cols["tail"] = [c for c in cols["body"] if c["name"] in tail_names]
-            cols["body"] = [c for c in cols["body"] if c["name"] not in tail_names]
+            own = {c["name"] for c in cols["tail"]}
+            cols["tail"] += [c for c in cols["body"] if c["name"] in tail_names and c["name"] not in own]
+        # Resolve explicit links across parts without taking a shared collider away
+        # from another chain that also references it.
+        for name, container in (("head", head), ("body", body), ("tail", tail)):
+            if container is None:
+                continue
+            have = {c["name"] for c in cols[name]}
+            cols[name] += [made[n] for n in sorted(collision_names(container) - have) if n in made]
         for name, main, extra in (("head", head, bust), ("body", body, None), ("tail", tail, None)):
             if main is None:
                 continue
@@ -297,7 +338,7 @@ class Simulation:
                     col["pos"] = mul3(offset, ls)
                 elif kind == CAPSULE:
                     col["pos"] = mul3(offset, ls)
-                    col["pos2"] = add(col["pos"], sub(offset2, offset))
+                    col["pos2"] = mul3(offset2, ls)
                 elif kind == PLANE:
                     # placed in world space at load, its forward is the plane normal
                     rot = from_to((0.0, 1.0, 0.0), v3(c["_normal"]))
@@ -339,7 +380,7 @@ class Simulation:
                 active = 0
                 for n in names:
                     k = table.get(n)
-                    if k is None:
+                    if k is None or active >= 16:
                         continue
                     if active < 8:
                         struct.pack_into("<h", root.buf, o + CINDEX_LO + 2 * active, k)
@@ -571,6 +612,11 @@ class Simulation:
         return {"parents": [self.names[n] for n in self.work_nodes],
                 "roots": [self.names[root.bones[0].node] for root in self.roots],
                 "bones": [self.names[b.node] for b in self.bones],
+                "contacts": [{"bone": b.name,
+                              "end": list(b.first_local_pos if length(b.first_local_pos) > MIN_BONE_DISTANCE else
+                                          scale(get3(root.buf, b.index * WORK + BONE_AXIS), getf(root.buf, b.index * WORK + INIT_DIST))),
+                              "radius": getf(root.buf, b.index * WORK + COL_RADIUS)}
+                             for root in self.roots for b in root.bones if b.exist and b.end_sim],
                 "hip": self.names[self.hip] if self.hip >= 0 else None}
 
 

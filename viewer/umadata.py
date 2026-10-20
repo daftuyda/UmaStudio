@@ -64,7 +64,7 @@ class Entry:
 
 def decrypt(data, base, key):
     """A dat/ file's bytes (uint8 array, changed in place) -> the plain bundle."""
-    if len(data) > HEADER:
+    if base and len(data) > HEADER:
         kb = struct.pack("<q", key)
         stream = np.frombuffer(bytes(b ^ kb[j] for b in base for j in range(8)), dtype=np.uint8)
         data[HEADER:] ^= stream[np.arange(HEADER, len(data)) % len(stream)]
@@ -83,12 +83,15 @@ def read_manifest(path):
 
 
 class GameData:
-    GAME_CACHE = os.path.join(CONFIG, "manifest-game.tsv")   # rows read from the game's meta
+    @property
+    def GAME_CACHE(self):
+        return os.path.join(gamepaths.config_cache(), "manifest-game.tsv")
 
     def __init__(self, progress=None):
         self._lock = threading.Lock()
         self._stamp = None
         self._failed = None   # the game files' stamp when reading them last failed
+        self._profile = None
         self.entries = {}
         self.names = []
         self.base = b""
@@ -102,6 +105,13 @@ class GameData:
         """True when the manifest is loaded (reloaded when its source changes): from the
         installed game, or else from the UmaStudio plugin's files."""
         with self._lock:
+            profile = gamepaths.cache_key()
+            if profile != self._profile:
+                self._profile = profile
+                self._stamp = self._failed = None
+                self.entries, self.names, self.base = {}, [], b""
+                self.source = self.error = None
+                self._charas = self._dresses = None
             try:
                 if self._from_game():
                     return True
@@ -130,9 +140,10 @@ class GameData:
     def _load_game(self, offline, st, stamp):
         stamp_file = self.GAME_CACHE + ".stamp"
         key = f"{gamepaths.meta()} {st.st_size} {st.st_mtime_ns}"
-        game = offline.game_folder()
-        if not (os.path.exists(self.GAME_CACHE) and os.path.exists(stamp_file) and open(stamp_file).read() == key):
-            os.makedirs(CONFIG, exist_ok=True)
+        game = gamepaths.game()
+        if not (os.path.exists(self.GAME_CACHE) and os.path.exists(stamp_file)
+                and open(stamp_file, encoding="utf-8").read() == key):
+            os.makedirs(gamepaths.config_cache(), exist_ok=True)
             tmp = self.GAME_CACHE + ".tmp"
             with open(tmp, "w", encoding="utf-8", newline="\n") as f:
                 f.write("v1\n")
@@ -140,35 +151,49 @@ class GameData:
                 for row in rows:
                     f.write("\t".join(str(x) for x in row) + "\n")
             os.replace(tmp, self.GAME_CACHE)
-            with open(stamp_file, "w") as f:
+            with open(stamp_file, "w", encoding="utf-8") as f:
                 f.write(key)
         self.progress("Reading the game's file list", 0.7)
         entries = read_manifest(self.GAME_CACHE)
         self.progress("Finding the bundle key", 0.85)
-        base = offline.bundle_key(game, lambda cand: self._opens(cand, entries))
+        base = offline.bundle_key(game, lambda cand: self._opens(cand, entries), entries)
         self.progress("Almost ready", 0.95)
         self.entries, self.names, self.base = entries, sorted(entries), base
+        self._charas = self._dresses = None
         self._stamp, self.source, self.error = stamp, "game", None
 
     @staticmethod
     def _opens(base, entries):
         """True when `base` decrypts a small downloaded bundle into one UnityPy can read."""
         import UnityPy
-        tried = 0
+        tried, opened, attempted = 0, 0, 0
+        keyed = any(e.key for e in entries.values() if not e.cat.startswith("manifest"))
         for e in entries.values():
-            if not e.cat.startswith("manifest") and e.size and e.size < 200_000 and e.key and e.local:
+            if (not e.cat.startswith("manifest") and 256 < e.size < 200_000
+                    and (e.key or not keyed) and e.local):
+                attempted += 1
                 try:
                     env = UnityPy.load(decrypt(np.fromfile(e.file, dtype=np.uint8), base, e.key))
-                    return bool(env.objects)
+                    if env.objects:
+                        opened += 1
+                        if opened >= 2:
+                            return True
+                    else:
+                        return False
                 except Exception:
                     tried += 1
                     if tried >= 3:
                         return False
-        return False
+        return opened == 1 and attempted == 1
 
     def _from_plugin(self):
-        mf = os.path.join(CONFIG, "manifest.tsv")
-        kf = os.path.join(CONFIG, "keys.json")
+        folder = gamepaths.config_cache()
+        mf = os.path.join(folder, "manifest.tsv")
+        kf = os.path.join(folder, "keys.json")
+        # The original plugin writes only Global exports to this shared directory.
+        if gamepaths.region() == "global" and not (os.path.exists(mf) and os.path.exists(kf)):
+            mf = os.path.join(CONFIG, "manifest.tsv")
+            kf = os.path.join(CONFIG, "keys.json")
         if not (os.path.exists(mf) and os.path.exists(kf)):
             return False
         stamp = ("plugin", os.path.getmtime(mf))
@@ -227,15 +252,20 @@ class GameData:
     # --- characters --------------------------------------------------------------------
 
     def charas(self):
+        import textlabels
         db = sqlite3.connect(f"file:{gamepaths.master()}?mode=ro", uri=True)
         try:
-            names = dict(db.execute("SELECT [index], text FROM text_data WHERE category = 6"))
-            dress_names = dict(db.execute("SELECT [index], text FROM text_data WHERE category = 14"))
+            source_names = dict(db.execute("SELECT [index], text FROM text_data WHERE category = 6"))
+            source_dresses = dict(db.execute("SELECT [index], text FROM text_data WHERE category = 14"))
+            names = textlabels.names(db, 6)
+            dress_names = textlabels.names(db, 14)
             charas = [{"id": r[0], "height": r[1], "shape": r[2], "bust": r[3], "tail": r[4], "skin": r[5], "socks": r[6],
+                       "sourceName": source_names.get(r[0], f"Chara {r[0]}"),
                        "name": names.get(r[0], f"Chara {r[0]}")}
                       for r in db.execute("SELECT id, height, shape, bust, tail_model_id, skin, socks FROM chara_data ORDER BY id")]
             dresses = [{"id": r[0], "chara": r[1], "body_type": r[2], "body_sub": r[3], "head_sub": r[4], "tail": r[5],
-                        "setting": r[6], "mini": bool(r[7]), "name": dress_names.get(r[0], f"Outfit {r[0]}")}
+                        "setting": r[6], "mini": bool(r[7]), "sourceName": source_dresses.get(r[0], f"Outfit {r[0]}"),
+                        "name": dress_names.get(r[0], f"Outfit {r[0]}")}
                        for r in db.execute("SELECT id, chara_id, body_type, body_type_sub, head_sub_id, tail_model_id, "
                                            "body_setting, have_mini FROM dress_data ORDER BY id")]
         finally:
@@ -258,10 +288,12 @@ class GameData:
     def mobs(self, dresses):
         """Background Umas: the generic head's face and hair parts, recoloured per mob, on the
         shared outfits. Height and shape are fixed for them, as in the game."""
+        import textlabels
         db = sqlite3.connect(f"file:{gamepaths.master()}?mode=ro", uri=True)
         db.row_factory = sqlite3.Row
         try:
-            names = dict(db.execute("SELECT [index], text FROM text_data WHERE category = 59"))
+            source_names = dict(db.execute("SELECT [index], text FROM text_data WHERE category = 59"))
+            names = textlabels.names(db, 59)
             hair = {r["id"]: dict(r) for r in db.execute("SELECT * FROM mob_hair_color_set")}
             dress = {r["id"]: dict(r) for r in db.execute("SELECT * FROM mob_dress_color_set")}
             rows = [dict(r) for r in db.execute("SELECT * FROM mob_data ORDER BY mob_id")]
@@ -276,6 +308,7 @@ class GameData:
                 continue
             c = {"id": r["mob_id"], "height": 1, "shape": 0, "bust": r["chara_bust_size"], "tail": 1,
                  "skin": r["chara_skin_color"], "socks": r["socks"], "name": names.get(r["mob_id"], f"Mob {r['mob_id']}"),
+                 "sourceName": source_names.get(r["mob_id"], f"Mob {r['mob_id']}"),
                  "mob": {"face": r["chara_face_model"], "hair": r["chara_hair_model"], "dress": r["dress_id"],
                          "hair_cutoff": r["hair_cutoff"], "sex": r["sex"],
                          "hair_colors": hair.get(r["chara_hair_color"], {}), "dress_colors": dress.get(r["dress_color_id"], {})}}
@@ -424,7 +457,9 @@ class GameData:
 
     def build_pack(self, chara_id, dress_id, packs_root, motions=True):
         c, d, paths = self.pack_paths(chara_id, dress_id, motions)
-        safe = "".join(ch if ch.isalnum() or ch in "_-." else "_" for ch in f"{c['id']} {c['name']} - {d['name']}")
+        # Display-language changes must not invalidate previously converted assets.
+        label = f"{c['id']} {c.get('sourceName', c['name'])} - {d.get('sourceName', d['name'])}"
+        safe = "".join(ch if ch.isalnum() or ch in "_-." else "_" for ch in label)
         folder = os.path.join(packs_root, safe)
         seen, keep = set(), set()
         for p in paths:

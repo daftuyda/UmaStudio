@@ -8,6 +8,8 @@ export const $$ = s => [...document.querySelectorAll(s)];
 const GENERIC = 'Working…';
 const waiting = [];
 let busyTimer = null;
+let gameSource = document.documentElement.dataset.gameSource || null;
+export const setGameSource = source => { gameSource = source; };
 
 function showBusy() {
   busyTimer = null;
@@ -36,7 +38,8 @@ export async function busy(label, promise) {
 /** label: what the top bar says while waiting; null for background requests. */
 export async function call(url, opts, label = GENERIC) {
   const run = async () => {
-    const r = await fetch(url, opts);
+    const options = gameSource ? { ...opts, headers: { ...opts?.headers, 'X-Game-Source': gameSource } } : opts;
+    const r = await fetch(url, options);
     const j = await r.json().catch(() => ({}));
     if (!r.ok || j.ok === false) throw new Error(j.error || r.statusText);
     return j;
@@ -98,9 +101,17 @@ export function initChrome() {
 
 export const radio = (sel, el) => $$(sel).forEach(x => x.classList.toggle('on', x === el));
 
+const sourceSettings = new Set(['props', 'recentProps', 'bgUrl']);
+const storageKey = k => 'umastudio.' + (gameSource && sourceSettings.has(k) ? gameSource + '.' : '') + k;
 export const store = {
-  get(k, d) { try { const v = localStorage.getItem('umastudio.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem('umastudio.' + k, JSON.stringify(v)); } catch { /* private mode */ } },
+  get(k, d) {
+    try {
+      let v = localStorage.getItem(storageKey(k));
+      if (v === null && sourceSettings.has(k) && gameSource?.startsWith('global-')) v = localStorage.getItem('umastudio.' + k);
+      return v === null ? d : JSON.parse(v);
+    } catch { return d; }
+  },
+  set(k, v) { try { localStorage.setItem(storageKey(k), JSON.stringify(v)); } catch { /* private mode */ } },
 };
 
 /** True while typing in a field, so single-key shortcuts stay out of the way. */

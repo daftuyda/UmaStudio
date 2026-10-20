@@ -4,6 +4,7 @@ import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { kindOf, makeMaterial, makeOutline } from '/static/look.js';
 import { $, $$, post, getJson, toast, store, radio, typing, busy, showTab } from '/static/ui.js';
 import { pickImage, pictureName, onPictureDropped } from '/static/images.js';
+import { propPlans, propFrame, setupKey } from '/static/animation-props.js';
 
 // props: the game's hand props, or one of your pictures as a card or a box, held by the Uma.
 // a picture can also replace a game prop's texture.
@@ -42,7 +43,7 @@ function bone(cur, name) {
 /** Game props in a hand sit exactly on the attach bone, as in the game. Everything else
  *  uses a frame that is upright when the Uma is at rest and turns as the bone turns, so
  *  "up" and "forward" mean what they look like. */
-const usesBoneFrame = p => p.kind === 'game' && (p.anchor === 'right' || p.anchor === 'left');
+const usesBoneFrame = p => p.kind === 'game' && (p.node || p.anchor === 'right' || p.anchor === 'left');
 
 function placeAnchor(p, cur) {
   const a = p.anchorObj;
@@ -64,7 +65,7 @@ function placeAnchor(p, cur) {
     a.quaternion.setFromRotationMatrix(_m.makeBasis(_x, _y, _z));
     return;
   }
-  const name = BONES[p.anchor], b = bone(cur, name);
+  const name = p.node || BONES[p.anchor], b = bone(cur, name);
   if (!b) { a.position.set(0, 0, 0); a.quaternion.identity(); return; }
   b.matrixWorld.decompose(a.position, a.quaternion, _s);
   if (!usesBoneFrame(p) && restInv.has(name)) a.quaternion.multiply(restInv.get(name));
@@ -75,11 +76,38 @@ export function updateProps() {
   if (!list.length) return;
   const cur = ctx.current();
   cur?.root.updateMatrixWorld(true);
-  for (const p of list) placeAnchor(p, cur);
+  for (const p of list) {
+    if (p.automatic) {
+      const action = cur?.action, frame = action && propFrame(action.getClip(), action.time, p.autoPlans || []);
+      p.anchorObj.visible = p.visible && !!frame;
+      if (!frame) continue;
+      p.node = frame.node;
+      if (frame.events) {
+        p.holder.position.fromArray(frame.pos || [0, 0, 0]);
+        p.holder.quaternion.fromArray(frame.quat || [0, 0, 0, 1]);
+        p.holder.scale.fromArray(frame.scale || [1, 1, 1]);
+      }
+      const motion = p.motionClips?.get(frame.motionPath);
+      if (motion !== p.activeMotion) {
+        p.autoMixer?.stopAllAction();
+        p.activeMotion = motion;
+        p.autoAction = motion ? p.autoMixer.clipAction(motion).setLoop(THREE.LoopOnce, 1).play() : null;
+        if (p.autoAction) p.autoAction.clampWhenFinished = true;
+      }
+      if (p.autoAction) {
+        p.autoAction.time = Math.min(frame.time, motion.duration);
+        p.autoMixer.update(0);
+      }
+    }
+    placeAnchor(p, cur);
+  }
 }
 
 /** A new character (or outfit) is loaded, still at rest. */
 export function onModel(cur) {
+  ++autoRequest;
+  animation = null;
+  clearAutomatic();
   restInv.clear();
   cur.root.updateMatrixWorld(true);
   for (const name of Object.values(BONES)) {
@@ -105,6 +133,7 @@ export async function applyGrips() {
   const want = [];
   for (const p of list) {
     if (p.kind !== 'game' || !p.grip || !p.visible) continue;
+    if (p.automatic && (!cur.action || !propFrame(cur.action.getClip(), cur.action.time, p.autoPlans || []))) continue;
     const path = p.anchor === 'right' ? p.info.grip : p.anchor === 'left' ? p.info.gripLeft : null;
     if (path && !want.includes(path)) want.push(path);
   }
@@ -126,7 +155,7 @@ export async function applyGrips() {
     a.play();
     return a;
   });
-  cur.mixer.update(0);
+  ctx.updateMotion(0);
 }
 
 // --- pictures -------------------------------------------------------------------------------
@@ -213,6 +242,7 @@ async function loadGame(name, quiet) {
   };
   const meshes = [];
   gltf.scene.traverse(o => { if (o.isMesh) meshes.push(o); });
+  await Promise.all(meshes.flatMap(mesh => Object.values(mesh.material.userData?.textures || {}).map(getTex)));
   const orig = new Map();
   for (const m of meshes) {
     const ud = m.material.userData || {};
@@ -427,12 +457,14 @@ async function addNow(kind, opts, quiet) {
     image: opts.image || null, fit: opts.fit || 'sides', turn: opts.turn || 0, toon: opts.toon ?? true,
     grip: opts.grip ?? true, visible: opts.visible ?? true, dims: opts.dims || null, info: null,
     anchorObj: new THREE.Object3D(), holder: new THREE.Object3D(), meshes: [], outlines: [], orig: new Map(), made: [],
+    automatic: !!opts.automatic, node: opts.node,
   };
   p.anchorObj.add(p.holder);
   if (kind === 'game') {
     const g = await loadGame(p.name);
     if (!g.meshes.length) throw new Error('That prop has nothing to show');
-    Object.assign(p, { info: g.info, meshes: g.meshes, orig: g.orig, box: bounds(g) });
+    if (opts.valid && !opts.valid()) { disposeGame(g); return null; }
+    Object.assign(p, { info: g.info, meshes: g.meshes, orig: g.orig, box: bounds(g), modelRoot: g.root });
     p.holder.add(g.root);
     for (const m of g.meshes) {
       if (!m.isSkinnedMesh) continue;
@@ -465,15 +497,16 @@ async function addNow(kind, opts, quiet) {
     p.holder.quaternion.fromArray(opts.quat);
     p.holder.scale.fromArray(opts.scale);
   } else defaultPlacement(p);
+  await refreshLook(p);
+  if (opts.valid && !opts.valid()) { if (kind === 'game') disposeGame(p); else p.made.forEach(x => x.dispose()); return null; }
   group.add(p.anchorObj);
   list.push(p);
-  await refreshLook(p);
   placeAnchor(p, ctx.current());
   if (!quiet) {
     select(p);
     save();
   } else renderList();
-  if (kind === 'game') applyGrips();
+  if (kind === 'game' && !p.automatic) applyGrips();
   return p;
 }
 
@@ -509,13 +542,14 @@ async function refreshLook(p) {
 }
 
 export function remove(p) {
+  if (!list.includes(p)) return;
   if (selected === p) select(null);
   list.splice(list.indexOf(p), 1);
   group.remove(p.anchorObj);
   p.made.forEach(x => x.dispose());
   if (p.kind === 'game') disposeGame(p);
   else p.meshes.forEach(m => m.geometry.dispose());
-  if (p.kind === 'game') applyGrips();
+  if (p.kind === 'game' && !p.automatic) applyGrips();
   renderList();
   save();
 }
@@ -545,12 +579,73 @@ function setPicture(p, url) {
 
 // --- saving ------------------------------------------------------------------------------------
 
-function save() {
-  store.set('props', list.map(p => ({
-    kind: p.kind, name: p.name, anchor: p.anchor, image: p.image, fit: p.fit, turn: p.turn, toon: p.toon, grip: p.grip,
+function serialize(p) {
+  return {
+    kind: p.kind, name: p.name, anchor: p.anchor, node: p.node, image: p.image, fit: p.fit, turn: p.turn, toon: p.toon, grip: p.grip,
     visible: p.visible, dims: p.dims, pos: p.holder.position.toArray(), quat: p.holder.quaternion.toArray(),
     scale: p.holder.scale.toArray(),
-  })));
+  };
+}
+function save() {
+  store.set('props', list.filter(p => !p.automatic).map(serialize));
+}
+
+// Animation props are temporary. User-added props keep their own lifetime and saved settings.
+let autoRequest = 0, animation = null;
+const savedSetups = () => store.get('animationPropSetups', {});
+function clearAutomatic() { for (const p of list.slice()) if (p.automatic) remove(p); }
+
+export async function prepareAnimation(clip, key) {
+  const request = ++autoRequest, model = ctx.current();
+  animation = { clip, key };
+  clearAutomatic();
+  const valid = () => request === autoRequest && model === ctx.current();
+  $('#rememberAnimationProps').disabled = !clip;
+  $('#forgetAnimationProps').disabled = !Object.hasOwn(savedSetups(), setupKey(key));
+  if (!$('#autoAnimationProps').checked) {
+    $('#animationPropsNote').textContent = 'Automatic props are off.';
+    await applyGrips();
+    return;
+  }
+  $('#animationPropsNote').textContent = 'Checking animation props…';
+  const groups = new Map();
+  let unavailable = 0;
+  for (const plan of propPlans(clip, key, savedSetups())) for (const setup of plan.setups) {
+    if (setup.available === false) { unavailable++; continue; }
+    const { events, motionPath, available, ...identity } = setup;
+    const id = JSON.stringify(identity);
+    if (!groups.has(id)) groups.set(id, { setup, plans: [] });
+    groups.get(id).plans.push({ ...plan, setup });
+  }
+  let loaded = 0, failed = 0;
+  for (const { setup, plans } of groups.values()) {
+    if (!valid()) return;
+    let p;
+    try {
+      p = await addNow(setup.kind || 'game', { ...setup, automatic: true, valid }, true);
+      if (!p || !valid()) { if (p) remove(p); return; }
+      p.autoPlans = plans;
+      p.anchorObj.visible = false;
+      p.motionClips = new Map();
+      p.autoMixer = p.modelRoot ? new THREE.AnimationMixer(p.modelRoot) : null;
+      for (const path of new Set(plans.map(x => x.setup.motionPath).filter(Boolean))) {
+        const r = await getJson('/api/prop/motion?' + new URLSearchParams({ name: p.name, path }), null);
+        if (!valid()) { remove(p); return; }
+        p.motionClips.set(path, ctx.buildClip(r.clip));
+      }
+      loaded++;
+    } catch (e) {
+      if (p) remove(p);
+      failed++;
+      console.warn('Animation prop unavailable', setup.name, e);
+    }
+  }
+  if (!valid()) return;
+  await applyGrips();
+  if (!valid()) return;
+  $('#animationPropsNote').textContent = loaded ? `${loaded} animation prop${loaded === 1 ? '' : 's'} ready.` :
+    'No supported prop link. Add props, then remember this setup.';
+  if (unavailable || failed) $('#animationPropsNote').textContent += ` ${unavailable + failed} prop${unavailable + failed === 1 ? '' : 's'} unavailable.`;
 }
 
 async function restore() {
@@ -563,7 +658,7 @@ async function restore() {
 // --- panel ------------------------------------------------------------------------------------
 
 function propLabel(p) {
-  const base = p.kind === 'game' ? `${KIND_LABEL.game} ${p.info?.id || ''}` : KIND_LABEL[p.kind];
+  const base = (p.automatic ? 'Animation · ' : '') + (p.kind === 'game' ? `${KIND_LABEL.game} ${p.info?.id || ''}` : KIND_LABEL[p.kind]);
   return p.image ? `${base} · ${pictureName(p.image)}` : base;
 }
 
@@ -644,6 +739,31 @@ export function initProps(c) {
     if (!e.value) { save(); syncEditor(); }
   });
   ctx.scene.add(tc);
+  $('#autoAnimationProps').checked = store.get('autoAnimationProps', true);
+  $('#autoAnimationProps').onchange = () => {
+    store.set('autoAnimationProps', $('#autoAnimationProps').checked);
+    if (animation) prepareAnimation(animation.clip, animation.key).catch(e => toast(e.message, true));
+  };
+  $('#rememberAnimationProps').onclick = () => {
+    if (!animation) return;
+    const setups = savedSetups(), chosen = list.filter(p => p.visible && p.anchorObj.visible && !p.automatic);
+    if (!chosen.length) return toast('Add a prop first.', true);
+    setups[setupKey(animation.key)] = chosen.map(serialize);
+    store.set('animationPropSetups', setups);
+    // These props now belong to this animation, avoiding duplicate persistent copies.
+    chosen.forEach(p => { p.automatic = true; });
+    save();
+    $('#autoAnimationProps').checked = true;
+    store.set('autoAnimationProps', true);
+    prepareAnimation(animation.clip, animation.key).catch(e => toast(e.message, true));
+  };
+  $('#forgetAnimationProps').onclick = () => {
+    if (!animation) return;
+    const setups = savedSetups();
+    delete setups[setupKey(animation.key)];
+    store.set('animationPropSetups', setups);
+    prepareAnimation(animation.clip, animation.key).catch(e => toast(e.message, true));
+  };
 
   $('#addProp').onclick = openPicker;
   $('#addCard').onclick = async () => {
@@ -692,6 +812,7 @@ export function initProps(c) {
   let down = null;
   ctx.canvas.addEventListener('pointerdown', e => { down = [e.clientX, e.clientY]; });
   ctx.canvas.addEventListener('pointerup', e => {
+    if (e.jointHandled) { down = null; return; }
     if (!down || e.button !== 0 || tc.dragging) return;
     const moved = Math.hypot(e.clientX - down[0], e.clientY - down[1]);
     down = null;

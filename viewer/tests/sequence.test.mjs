@@ -1,0 +1,83 @@
+// node --experimental-vm-modules viewer/tests/sequence.test.mjs
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { SourceTextModule } from 'node:vm';
+
+const three = new SourceTextModule(await readFile(new URL('../static/vendor/three.module.js', import.meta.url), 'utf8'));
+await three.link(() => { throw new Error('Unexpected dependency'); });
+await three.evaluate();
+const module = new SourceTextModule(await readFile(new URL('../static/sequence.js', import.meta.url), 'utf8'));
+await module.link(() => three);
+await module.evaluate();
+const THREE = three.namespace;
+const { stitchClips, segmentAt, animatedFace } = module.namespace;
+const bone = new THREE.Object3D();
+bone.name = 'Hip';
+bone.position.set(2, 0, 0);
+const rest = new Map([[bone, [bone.position.clone(), bone.quaternion.clone(), bone.scale.clone()]]]);
+const first = new THREE.AnimationClip('Shot 1', 1, [new THREE.VectorKeyframeTrack('Hip.position', [0, 1], [0, 0, 0, 1, 0, 0])]);
+const second = new THREE.AnimationClip('Shot 2', 2, [new THREE.VectorKeyframeTrack('Hip.position', [0], [10, 0, 0])]);
+const third = new THREE.AnimationClip('Shot 3', 1, []);
+first.faceMotion = { fps: 1, tracks: [{ channel: 'eye_l', shape: 'CloseA', values: [0, 1] }] };
+second.faceMotion = { fps: 1, tracks: [{ channel: 'mouth', shape: 'WaraiA', values: [-.5] }] };
+const parts = [first, second, third].map((clip, i) => ({ clip, key: '' + i, label: clip.name }));
+const all = stitchClips(parts, rest);
+assert.equal(all.duration, 4);
+assert.deepEqual(all.segments.map(s => s.start), [0, 1, 3]);
+const sample = all.tracks[0].createInterpolant();
+assert.ok(Math.abs(sample.evaluate(.5)[0] - .5) < .0001);
+assert.ok(sample.evaluate(.999)[0] < 1.01, 'No blend into next shot');
+assert.equal(sample.evaluate(1)[0], 10, 'Hard cut at the boundary');
+assert.equal(sample.evaluate(3)[0], 2, 'Missing track restores rest pose');
+assert.ok(Math.abs(sample.evaluate(.25)[0] - .25) < .0001, 'Seeking backwards works');
+for (let i = 1; i < all.tracks[0].times.length; i++) assert.ok(all.tracks[0].times[i] > all.tracks[0].times[i - 1]);
+assert.equal(segmentAt(all, 1).key, '1');
+assert.deepEqual(animatedFace(all, .5).eye_l, [['CloseA', .5]]);
+assert.deepEqual(animatedFace(all, 1).mouth, [['WaraiA', .5]]);
+assert.equal(animatedFace(all, 3), null, 'A shot without a face must not retain the previous expression');
+const action = new THREE.AnimationMixer(bone).clipAction(all).play();
+action.getMixer().update(4.25);
+assert.ok(Math.abs(action.time - .25) < .0001, 'Repeat the whole sequence');
+console.log('Sequence tests passed: timing, cuts, rest pose, seeking, face synchronization and full-sequence repeat.');
+
+const cameraModule = new SourceTextModule(await readFile(new URL('../static/animation-camera.js', import.meta.url), 'utf8'));
+await cameraModule.link(name => name === 'three' ? three : module);
+await cameraModule.evaluate();
+const { cameraAt, AnimationCamera } = cameraModule.namespace;
+const cameraMotion = { camera: { fps: 1, tracks: [
+  { type: 'position', values: [0, 1, 4, 2, 1, 4] },
+  { type: 'quaternion', values: [0, 0, 0, 1] },
+  { type: 'scale', values: [30, 0, 1, 50, 0, 1] }
+] }, position: { fps: 1, tracks: [{ type: 'position', values: [1, 0, 0] }] } };
+first.cameraMotion = cameraMotion;
+assert.equal(cameraAt(all, .5).fov, 40);
+assert.deepEqual(cameraAt(all, .5).p, [1, 1, 4]);
+assert.equal(cameraAt(all, 1), null, 'Do not retain the previous shot camera when absent');
+const cam = new THREE.PerspectiveCamera(25);
+cam.position.set(0, 2, 8);
+const control = { target: new THREE.Vector3(0, 1, 0), enabled: true };
+const controller = new AnimationCamera(cam, control);
+const root = new THREE.Object3D();
+root.position.set(3, 0, 0);
+const subject = { root, action: { getClip: () => all, time: .5 } };
+assert.equal(controller.apply(subject, true), true);
+assert.deepEqual(cam.position.toArray(), [4, 1, 4], 'Camera follows the character base transform');
+assert.deepEqual(root.position.toArray(), [4, 0, 0], 'Apply authored placement without accumulating it');
+controller.apply(subject, true);
+assert.deepEqual(root.position.toArray(), [4, 0, 0]);
+assert.equal(control.enabled, false);
+assert.ok(Math.abs(cam.fov - 40) < .00001);
+controller.apply(subject, true, 2);
+assert.ok(Math.abs(Math.tan(cam.fov * Math.PI / 360) - 2 * Math.tan(40 * Math.PI / 360)) < 1e-6);
+controller.apply(subject, false);
+assert.deepEqual(cam.position.toArray(), [0, 2, 8]);
+assert.deepEqual(root.position.toArray(), [3, 0, 0]);
+assert.equal(cam.fov, 25);
+assert.equal(control.enabled, true);
+controller.apply(subject, true);
+subject.action.time = 1.1;
+assert.equal(controller.apply(subject, true), false);
+assert.deepEqual(cam.position.toArray(), [0, 2, 8], 'Missing shots restore the manual view');
+cameraMotion.mirrored = true;
+assert.equal(cameraAt(all, .5).p[0], -1);
+console.log('Animation camera tests passed: interpolation, shot boundaries, placement, mirroring, guide FOV and manual-view restoration.');

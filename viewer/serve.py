@@ -10,13 +10,16 @@ game's file list load behind a progress bar (boot()).
 """
 import base64
 import contextlib
+import errno
 import glob
 import gzip
+import hashlib
 import json
 import mimetypes
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -24,8 +27,15 @@ import time
 import traceback
 import uuid
 import webbrowser
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
+
+# Redirected Windows consoles may use a legacy code page. Japanese pack names
+# must never turn a successful conversion into an HTTP error while logging it.
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="backslashreplace")
 
 # frozen (UmaStudio.exe): the scripts and static/ are unpacked under _MEIPASS
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
@@ -35,7 +45,7 @@ import gamepaths  # noqa: E402
 # of seconds.
 cyspring = motionnames = offline = story = umaconv = umadata = None
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 PORT = 27620
 CONFIG = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "UmaStudio")   # = umadata.CONFIG
 ROOT = os.path.join(os.path.expanduser("~"), "Pictures", "UmaStudio")
@@ -51,10 +61,10 @@ PROP_THUMBS = os.path.join(PROPS, "_thumbs")
 BGS = os.path.join(CACHE, "_bg")
 STATIC = os.path.join(HERE, "static")
 CONVERTER_VERSION = "10"
-PROP_VERSION = "1"
+PROP_VERSION = "2"
 IMAGE_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp", "gif": "image/gif"}
-SETUP = ("UmaStudio could not read the installed game's files. Check that Uma Musume is installed "
-         "through Steam and has downloaded its data (start it once), or pick the game's folder.")
+SETUP = ("UmaStudio could not read the selected game's files. Open Settings to choose Global or "
+         "Japan (JP), then check its install and data folders. Start that game once to download its data.")
 
 DATA = None
 _lock = threading.Lock()
@@ -63,12 +73,54 @@ _charas = {"stamp": None, "list": None}
 _boot = {"stage": "Starting", "progress": 0.0, "done": False, "error": None}
 _booted = threading.Event()
 _window = []   # the app window once it is open, for the folder picker
+_source_lock = threading.RLock()
+_generation = 0
+
+
+def source_directories():
+    """Converted assets belong to one region and one data source."""
+    global PACKS, BUNDLES, CACHE, LIBRARY_DIR, ICONS, PROPS, PROP_THUMBS, BGS
+    key = gamepaths.cache_key()
+    PACKS = os.path.join(ROOT, "packs", key)
+    BUNDLES = os.path.join(ROOT, "bundles", key)
+    CACHE = os.path.join(ROOT, "viewer-cache", key)
+    LIBRARY_DIR = os.path.join(CACHE, "_library")
+    ICONS = os.path.join(CACHE, "_icons")
+    PROPS = os.path.join(CACHE, "_props")
+    PROP_THUMBS = os.path.join(PROPS, "_thumbs")
+    BGS = os.path.join(CACHE, "_bg")
+    os.makedirs(CACHE, exist_ok=True)
+
+
+def change_source(body):
+    global DATA, _generation
+    if not _boot["done"]:
+        raise ValueError("Game files are still loading. Try again when loading finishes.")
+    if _videos or _encoding[0]:
+        raise ValueError("Finish or cancel the current video export before switching games.")
+    game, data = gamepaths.configure(body.get("region", gamepaths.region()),
+                                    body.get("game", ""), body.get("data", ""), body.get("path"))
+    _generation += 1
+    source_directories()
+    DATA = None
+    _charas.update(stamp=None, list=None)
+    _sets.clear()
+    _paths.update(key=None, map={})
+    _springs.clear()
+    if cyspring:
+        cyspring.reset_plugin()
+    _warm.update(stage="", done=0, total=0, finished=False)
+    _boot.update(stage="Reading the game's file list", progress=0, done=False, error=None)
+    _booted.clear()
+    threading.Thread(target=boot, daemon=True).start()
+    return {"ok": True, "game": game, "data": data, "region": gamepaths.region()}
 
 
 def boot():
     """The heavy modules, then the game's file list; /api/status shows the progress.
     Starts the warm-up when done."""
     global cyspring, motionnames, offline, story, umaconv, umadata, DATA
+    generation = _generation
     try:
         import cyspring, motionnames, offline, story, umaconv, umadata  # noqa: F401,F811
         _boot.update(stage="Reading the game's file list", progress=0.15)
@@ -84,7 +136,7 @@ def boot():
         _boot.update(done=True, progress=1.0)
         _booted.set()
     if DATA is not None:
-        threading.Thread(target=warm, daemon=True).start()
+        threading.Thread(target=warm, args=(generation,), daemon=True).start()
 
 
 def need_data():
@@ -273,7 +325,7 @@ def library_list(cat, q, offset, limit, mirror, chara=None):
     hits = [st for st in library_sets(cat, mirror) if all(t in st["search"] for t in terms)]
     if chara:
         hits.sort(key=lambda st: st["chara"] != chara)   # the loaded uma's own first
-    page = [{k: st[k] for k in ("title", "sub", "family", "name", "tags", "chara", "parts", "default")}
+    page = [{k: st[k] for k in ("title", "sub", "family", "name", "tags", "chara", "parts", "default", "sequence")}
             for st in hits[offset:offset + limit]]
     return {"items": page, "total": len(hits), "cats": [{"key": k, "label": l} for k, l, _ in LIBRARY]}
 
@@ -329,6 +381,50 @@ def library_clip(path):
 
 
 # --- props ------------------------------------------------------------------------------------
+
+def animation_companions(path):
+    import facial, animationcamera, animationprops
+    need_data()
+    if not re.fullmatch(r"(?:3d/motion/[\w/]+/)?anm_[\w]+", path):
+        raise ValueError("not an animation")
+    # The region and manifest revision are part of the cache identity.
+    key = hashlib.sha256(repr((DATA._stamp, path, "companions-2")).encode()).hexdigest()
+    target = os.path.join(CACHE, "_companions", key + ".json.gz")
+    if os.path.exists(target):
+        with open(target, "rb") as f:
+            return f.read()
+    try:
+        props = animationprops.companion(DATA, path)
+    except (ValueError, KeyError, TypeError):
+        props = []  # Unsupported timeline versions must not prevent body playback.
+    result = {"face": facial.companion(DATA, path), "camera": animationcamera.companion(DATA, path), "props": props}
+    encoded = gzip.compress(json.dumps(result, separators=(",", ":")).encode(), 3)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    tmp = target + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(encoded)
+    os.replace(tmp, target)
+    return encoded
+
+
+def prop_motion(name, path):
+    if not PROP_NAME.fullmatch(name) or not path.startswith("3d/motion/") or "/prop/" not in path:
+        raise ValueError("not a prop motion")
+    prop_load(name)
+    target = os.path.join(PROPS, name, hashlib.sha256(path.encode()).hexdigest() + ".motion.json")
+    if os.path.exists(target):
+        with open(target, encoding="utf-8") as f:
+            return json.load(f)
+    with open(os.path.join(PROPS, name, "paths.json"), encoding="utf-8") as f:
+        paths = {int(k): v for k, v in json.load(f).items()}
+    files = DATA.export(path, BUNDLES, deps=False)
+    clips = umaconv.convert_clip_bundle(files[0], paths)
+    if not clips or clips[0].get("unmapped"):
+        raise ValueError("This prop motion uses an unsupported rig")
+    result = {"clip": clips[0]}
+    with open(target, "w", encoding="utf-8") as f:
+        json.dump(result, f, separators=(",", ":"))
+    return result
 #
 # hand props (3d/chara/prop/propNNNN_VV), converted one at a time when first used. the game
 # attaches them to Hand_Attach_L/R, a matching grip motion (fingers and attach point) exists
@@ -484,32 +580,40 @@ def serving():
             _active[0] -= 1
 
 
-def warm():
-    while not DATA.ready():
-        time.sleep(5)
+def warm(generation):
+    with _source_lock:
+        if generation != _generation:
+            return
+        if DATA is None or not DATA.ready():
+            _warm.update(finished=True)
+            return
+        jobs = warm_jobs()
+        _warm.update(total=len(jobs), done=0)
+    for stage, job in jobs:
+        while _active[0] and generation == _generation:
+            time.sleep(0.05)
+        with _source_lock:
+            if generation != _generation:
+                return
+            _warm["stage"] = stage
+            try:
+                job()
+            except Exception:
+                traceback.print_exc()
+            _warm["done"] += 1
+    with _source_lock:
+        if generation == _generation:
+            _warm.update(stage="", finished=True)
+
+
+def warm_jobs():
     jobs = []
     for c in charas():
         if not os.path.exists(os.path.join(ICONS, f"{c['id']}.png")):
             jobs.append(("Uma pictures", lambda c=c: icon(c["id"])))
-    jobs += [("Pose lists", lambda k=k: library_sets(k, False)) for k, _, _ in LIBRARY]
-    for it in prop_list():
-        stamp = os.path.join(PROPS, it["name"], "version.txt")
-        if not (os.path.exists(stamp) and open(stamp).read() == PROP_VERSION):
-            jobs.append(("Props", lambda n=it["name"]: prop_load(n)))
-    for b in bg_list():
-        if not os.path.exists(os.path.join(BGS, "thumbs", b["name"] + ".jpg")):
-            jobs.append(("Backgrounds", lambda n=b["name"]: bg_image(n, True)))
-    _warm.update(total=len(jobs), done=0)
-    for stage, job in jobs:
-        while _active[0]:
-            time.sleep(0.05)
-        _warm["stage"] = stage
-        try:
-            job()
-        except Exception:
-            traceback.print_exc()
-        _warm["done"] += 1
-    _warm.update(stage="", finished=True)
+    # Large catalogs are prepared when opened. Converting every prop/background here
+    # held the source lock for seconds at a time and delayed foreground loads.
+    return jobs
 
 
 # --- video ------------------------------------------------------------------------------------
@@ -645,7 +749,7 @@ def open_window(url):
     if not exe:
         webbrowser.open(url)
         return
-    profile = os.path.join(CONFIG, "window")
+    profile = os.path.join(CONFIG, "window-" + VERSION)
     subprocess.Popen([exe, f"--app={url}", f"--user-data-dir={profile}", "--no-first-run",
                       "--no-default-browser-check", "--window-size=1600,950"])
 
@@ -676,10 +780,10 @@ def native_window(url):
     except ImportError:
         return False
     try:
-        _window.append(webview.create_window("UmaStudio", url, width=1600, height=950, min_size=(1000, 640),
+        _window.append(webview.create_window("UmaStudio " + VERSION, url, width=1600, height=950, min_size=(1000, 640),
                               background_color="#0e1014", text_select=False))
         webview.start(gui="edgechromium", private_mode=False,
-                      storage_path=os.path.join(CONFIG, "webview"))
+                      storage_path=os.path.join(CONFIG, "webview-" + VERSION))
         return True
     except Exception:
         traceback.print_exc()
@@ -700,6 +804,10 @@ class Handler(BaseHTTPRequestHandler):
     def _host_ok(self):
         return (self.headers.get("Host") or "").split(":")[0] in ("127.0.0.1", "localhost")
 
+    def _source_ok(self):
+        source = self.headers.get("X-Game-Source")
+        return not source or source == gamepaths.cache_key()
+
     def _send(self, status, body, ctype="application/json", cache=False, gzipped=False):
         if isinstance(body, (dict, list)):
             body = json.dumps(body).encode("utf-8")
@@ -710,6 +818,8 @@ class Handler(BaseHTTPRequestHandler):
         if gzipped:
             self.send_header("Content-Encoding", "gzip")
         self.send_header("Content-Length", str(len(body)))
+        # Game URLs are reused after switching profiles. Never retain their old pixels.
+        cache = cache and self.path.startswith(("/static/", "/img/"))
         self.send_header("Cache-Control", "max-age=86400" if cache else "no-store")
         self.end_headers()
         self.wfile.write(body)
@@ -729,10 +839,28 @@ class Handler(BaseHTTPRequestHandler):
     # browsers keep idle connections open).
     def do_GET(self):
         with serving():
-            self._get()
+            route = unquote(urlparse(self.path).path)
+            if route.startswith("/data/"):
+                # Pin the region-specific path, then let independent texture/mesh reads
+                # proceed concurrently. Region switches cannot change this local path.
+                with _source_lock:
+                    if not self._host_ok():
+                        return self._send(421, {"error": "unexpected Host"})
+                    if not self._source_ok():
+                        return self._send(409, {"error": "The game region changed. Reload the viewer to continue."})
+                    path = safe_join(CACHE, route[len("/data/"):])
+                try:
+                    return self._file(path)
+                except ConnectionError:
+                    return
+            if route.startswith("/static/") or route in ("/api/ping", "/api/status", "/api/warm", "/api/instance"):
+                self._get()
+            else:
+                with _source_lock:
+                    self._get()
 
     def do_POST(self):
-        with serving():
+        with serving(), _source_lock:
             self._post()
 
     def _get(self):
@@ -741,9 +869,17 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         p = unquote(url.path)
         q = {k: v[0] for k, v in parse_qs(url.query).items()}
+        if p not in ("/api/status", "/api/settings", "/api/ping", "/api/warm") and not self._source_ok():
+            return self._send(409, {"ok": False, "error": "The game region changed. Reload the viewer to continue."})
         try:
+            if p == "/api/instance":
+                return self._send(200, instance_info())
             if p == "/":
-                return self._file(os.path.join(STATIC, "index.html"))
+                with open(os.path.join(STATIC, "index.html"), encoding="utf-8") as f:
+                    page = f.read()
+                page = page.replace('<html lang="en">',
+                                    f'<html lang="en" data-game-source="{gamepaths.cache_key()}">', 1)
+                return self._send(200, page, "text/html; charset=utf-8")
             if p.startswith("/static/"):
                 return self._file(safe_join(STATIC, p[len("/static/"):]))
             if p == "/api/ping":
@@ -752,13 +888,18 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/status":
                 if not _boot["done"]:
                     return self._send(200, {"ready": False, "loading": True, "stage": _boot["stage"],
-                                            "progress": round(_boot["progress"], 3), "version": VERSION})
-                ready = DATA is not None and DATA.ready()
-                game, data = gamepaths.paths()
-                return self._send(200, {"ready": ready, "setup": SETUP, "version": VERSION,
-                                        "error": (DATA.error if DATA else None) or _boot["error"],
-                                        "game": game, "data": data, "picked": gamepaths.picked(),
-                                        "browse": bool(_window), "recent": recent()})
+                                            "progress": round(_boot["progress"], 3), "version": VERSION,
+                                            "region": gamepaths.region()})
+                with _source_lock:
+                    ready = DATA is not None and DATA.ready()
+                    game, data = gamepaths.paths()
+                    return self._send(200, {"ready": ready, "setup": SETUP, "version": VERSION,
+                                            "error": (DATA.error if DATA else None) or _boot["error"],
+                                            "game": game, "data": data, "picked": gamepaths.picked(),
+                                            "region": gamepaths.region(), "source": gamepaths.cache_key(),
+                                            "browse": bool(_window), "recent": recent()})
+            if p == "/api/settings":
+                return self._send(200, {"ok": True, **gamepaths.describe(), "browse": bool(_window)})
             if p == "/api/charas":
                 return self._send(200, {"ok": True, "charas": charas()})
             m = re.match(r"^/api/icon/(\d+)(?:_(\d+))?$", p)
@@ -774,10 +915,14 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/library/clip":
                 with open(library_clip(q.get("path", "")), "rb") as f:
                     return self._send(200, f.read(), gzipped=True)
+            if p in ("/api/animation/face", "/api/animation/companions"):
+                return self._send(200, animation_companions(q.get("path", "")), gzipped=True)
             if p == "/api/story":
                 return self._send(200, story_scene(q.get("id", "")), gzipped=True)
             if p == "/api/props":
                 return self._send(200, {"ok": True, "items": prop_list()})
+            if p == "/api/prop/motion":
+                return self._send(200, prop_motion(q.get("name", ""), q.get("path", "")))
             m = re.match(r"^/api/prop/thumb/(pfb_chr_prop\d+_\d+)$", p)
             if m:
                 return self._file(os.path.join(PROP_THUMBS, m.group(1) + ".png"), cache=True)
@@ -793,6 +938,8 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/data/([^/]+)/(.+)$", p)
             if m:
                 return self._file(safe_join(os.path.join(CACHE, m.group(1)), m.group(2)))
+        except ConnectionError:
+            return  # the viewer may reload while old images are still arriving
         except Exception as e:
             traceback.print_exc()
             return self._send(500, {"ok": False, "error": str(e)})
@@ -801,6 +948,8 @@ class Handler(BaseHTTPRequestHandler):
     def _post(self):
         if not self._host_ok() or self.headers.get("X-Studio") != "1":
             return self._send(403, {"error": "forbidden"})
+        if self.path not in ("/api/settings", "/api/game/path", "/api/game/browse") and not self._source_ok():
+            return self._send(409, {"ok": False, "error": "The game region changed. Reload the viewer to continue."})
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         try:
             if self.path.startswith("/api/video/frame"):
@@ -857,12 +1006,11 @@ class Handler(BaseHTTPRequestHandler):
                 with open(os.path.join(PROP_THUMBS, name + ".png"), "wb") as f:
                     f.write(base64.b64decode(body.get("png", "").split(",", 1)[-1]))
                 return self._send(200, {"ok": True})
-            if self.path == "/api/game/path":
+            if self.path in ("/api/game/path", "/api/settings"):
                 try:
-                    game, data = gamepaths.pick(body.get("path", ""))
+                    return self._send(200, change_source(body))
                 except ValueError as e:
                     return self._send(400, {"ok": False, "error": str(e)})
-                return self._send(200, {"ok": True, "game": game, "data": data})
             if self.path == "/api/game/browse":
                 return self._send(200, {"ok": True, "path": browse_folder()})
             if self.path == "/api/open":
@@ -870,10 +1018,55 @@ class Handler(BaseHTTPRequestHandler):
                 os.makedirs(target, exist_ok=True)
                 subprocess.Popen(["explorer", target])
                 return self._send(200, {"ok": True})
+        except ConnectionError:
+            return
         except Exception as e:
             traceback.print_exc()
             return self._send(500, {"ok": False, "error": str(e)})
         self._send(404, {"error": "not found"})
+
+
+def instance_info():
+    return {"app": "UmaStudio", "version": VERSION, "ui": "smooth-surface-collisions"}
+
+
+class StudioServer(ThreadingHTTPServer):
+    # Windows permits two SO_REUSEADDR listeners on the same port. That can
+    # route the new window to the old app even when bind() reports success.
+    allow_reuse_address = False
+    request_queue_size = 64
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def matching_instance(url):
+    """An occupied port may belong to an older release or another application."""
+    try:
+        with urllib.request.urlopen(url + "/api/instance", timeout=1) as response:
+            return json.loads(response.read(4096)) == instance_info()
+    except (OSError, ValueError):
+        return False
+
+
+def server_for_window(port):
+    """Reuse this release only. Keep older windows open and serve our UI separately."""
+    for candidate in range(port, min(port + 10, 65536)):
+        url = f"http://127.0.0.1:{candidate}/"
+        try:
+            server = StudioServer(("127.0.0.1", candidate), Handler)
+        except OSError as e:
+            if e.errno != errno.EADDRINUSE and getattr(e, "winerror", None) != 10048:
+                raise
+            if matching_instance(url.rstrip("/")):
+                return None, url
+            continue
+        return server, f"http://127.0.0.1:{server.server_address[1]}/"
+    # Unusually busy machines can use a port chosen by Windows.
+    server = StudioServer(("127.0.0.1", 0), Handler)
+    return server, f"http://127.0.0.1:{server.server_address[1]}/"
 
 
 def main():
@@ -881,19 +1074,16 @@ def main():
     if sys.stdout is None:   # pythonw / the exe: no console, so keep a log instead
         os.makedirs(CONFIG, exist_ok=True)
         sys.stdout = sys.stderr = open(os.path.join(CONFIG, "viewer.log"), "a", encoding="utf-8", buffering=1)
-    os.makedirs(CACHE, exist_ok=True)
+    source_directories()
     port = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else PORT   # a second copy, for testing
-    url = f"http://127.0.0.1:{port}/"
     # thumbnails, frames and model files arrive in bursts, the default backlog of 5 can drop
     # connections while the GIL is busy decoding.
-    ThreadingHTTPServer.request_queue_size = 64
-    try:
-        server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    except OSError:
-        # already running: open another window onto it
+    server, url = server_for_window(port)
+    if server is None:
+        # This release is already running: open another window onto it.
         if app:
             native_window(url) or open_window(url)
-        else:
+        elif "--no-browser" not in sys.argv:
             webbrowser.open(url)
         return
     print(f"UmaStudio viewer on {url}", flush=True)
