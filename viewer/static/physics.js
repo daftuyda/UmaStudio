@@ -69,7 +69,7 @@ export class GameSprings {
   }
 
   /** `ticks` steps on the current pose (more than one only for warm-up / catching up). */
-  async step(ticks = 1) {
+  async step(ticks = 1, signal = null) {
     if (!this.enabled || this.dead) return;
     this.surface.restore();
     const reset = this.pendingReset;
@@ -83,10 +83,32 @@ export class GameSprings {
     for (const p of this.parents) { this.modelSpace(p); uPos(_p, a, o); uQuat(_q, a, o + 3); o += 7; }
     for (const r of this.roots) { uPos(r.position, a, o); o += 3; }
     for (const b of this.bones) { uQuat(b.quaternion, a, o); o += 4; }
-    const res = await fetch(`/api/spring/step?id=${this.id}`, { method: 'POST', headers: { 'X-Studio': '1' }, body: a.buffer });
-    if (res.status === 410) { this.dead = true; return; }
-    if (!res.ok) throw new Error('physics step failed');
-    const r = new Float32Array(await res.arrayBuffer());
+    const requestID = String(this.sequence = (this.sequence || 0) + 1);
+    let data;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      signal?.throwIfAborted();
+      const controller = new AbortController(), cancel = () => controller.abort();
+      signal?.addEventListener('abort', cancel, { once: true });
+      const timeout = setTimeout(cancel, 20000);
+      try {
+        const res = await fetch(`/api/spring/step?id=${this.id}`, { method: 'POST',
+          signal: controller.signal, headers: { 'X-Studio': '1', 'X-Step-ID': requestID }, body: a.buffer });
+        if (res.status === 410) { this.dead = true; throw new Error('Physics session expired. Reload the character.'); }
+        if (!res.ok) throw new Error('Physics step failed. Reload the character and try again.');
+        data = await res.arrayBuffer();
+        break;
+      } catch (e) {
+        if (signal?.aborted || attempt === 2 || (!(e instanceof TypeError) && e.name !== 'AbortError'))
+          this.pendingReset = true;
+        signal?.throwIfAborted();
+        if (!(e instanceof TypeError) && e.name !== 'AbortError') throw e;
+        if (attempt === 2) throw new Error('The physics connection stopped responding. Try the export again.');
+      } finally {
+        clearTimeout(timeout);
+        signal?.removeEventListener('abort', cancel);
+      }
+    }
+    const r = new Float32Array(data);
     this.bones.forEach((b, i) => {
       this.finals[i] = r[5 * i] > 0.5 ? new THREE.Quaternion(r[5 * i + 1], -r[5 * i + 2], -r[5 * i + 3], r[5 * i + 4]) : null;
     });

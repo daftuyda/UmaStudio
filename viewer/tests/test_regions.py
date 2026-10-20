@@ -127,7 +127,7 @@ class RegionTests(unittest.TestCase):
 
     def test_switch_during_export_is_rejected(self):
         self.enterContext(patch.object(serve, "_boot", {"done": True}))
-        self.enterContext(patch.object(serve, "_videos", {"active": {}}))
+        self.enterContext(patch.object(serve._exports, "active", return_value=True))
         with self.assertRaisesRegex(ValueError, "video export"):
             serve.change_source({"region": "jp"})
         self.assertFalse(Path(gamepaths.SETTINGS).exists())

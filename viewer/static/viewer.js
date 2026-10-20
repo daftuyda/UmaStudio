@@ -3,11 +3,14 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { GameSprings, TICK } from '/static/physics.js';
+import { FrameEncoder, exportRequest, uploadFrame, progressText, pause } from '/static/video-export.js';
 import { U, kindOf, makeMaterial, makeOutline } from '/static/look.js';
 import { $, $$, call, post, getJson, toast, radio, store, busy, initChrome, setGameSource } from '/static/ui.js';
 import { pickImage, pictureName } from '/static/images.js';
 import * as props from '/static/props.js';
 import * as pose from '/static/pose.js';
+import * as animate from '/static/animate.js';
+import { sampleProject } from '/static/animation-project.js';
 import { initSettings } from '/static/settings.js';
 import { stitchClips, segmentAt, animatedFace } from '/static/sequence.js';
 import { AnimationCamera } from '/static/animation-camera.js';
@@ -251,11 +254,15 @@ async function loadModel(pack, manifest, sets, chara, dress, request) {
     current.root.traverse(o => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
   }
   const root = gltf.scene;
+  animate.deactivate();
   scene.add(root);
   const rest = new Map();
   root.traverse(o => { if (o.isBone || o.type === 'Object3D') rest.set(o, [o.position.clone(), o.quaternion.clone(), o.scale.clone()]); });
   current = { pack, base, manifest, sets, root, rest, outlines, chara: chara.id, name: chara.name, dress: dress.name, miniParts,
               mixer: new THREE.AnimationMixer(root), action: null, clips: new Map(), springs: null, named: {} };
+  current.mixer.addEventListener('finished', e => {
+    if (current?.action === e.action && e.action.getClip().authorProject) setPlaying(false);
+  });
   follow.root = null;
   current.mixer.timeScale = parseFloat($('#speed').value);
   props.onModel(current);
@@ -546,6 +553,7 @@ async function libraryClip(path) {
 function updateMotion(dt) {
   pose.beforeAnimation();
   current.mixer.update(dt);
+  animate.applyRoot();
 }
 
 function restPose() {
@@ -561,7 +569,10 @@ async function playClip(clip, key, autoplay, title) {
   const request = ++activationRequest, model = current;
   await props.prepareAnimation(clip, key);
   if (request !== activationRequest || current !== model) return;
+  if (!clip.authorProject) animate.deactivate();
+  const previous = current.action?.getClip();
   restPose();
+  if (previous?.authorProject) current.mixer.uncacheClip(previous);
   const a = current.mixer.clipAction(clip);
   a.reset();
   a.setLoop(THREE.LoopRepeat, Infinity);
@@ -582,6 +593,7 @@ async function playClip(clip, key, autoplay, title) {
 
 let playing = false;
 function setPlaying(p) {
+  if (p && !playing) animate.beforePlay();
   playing = p && !!(current && current.action);
   if (current && current.action) current.action.paused = !playing;
   $('#play').textContent = playing ? '❚❚' : '▶';
@@ -600,11 +612,15 @@ function updateTime() {
   if (document.activeElement !== $('#scrub')) $('#scrub').value = t;
   const clip = segment?.clip || current?.action?.getClip();
   $('#animationFaceNote').textContent = !$('#animationFace').checked ? 'Manual expression.' :
+    clip?.authorProject ? 'Following your expression keyframes.' :
     clip?.faceMotion?.tracks.length ? 'Following the pose’s facial animation.' : 'No matching face clip. Manual expressions are available.';
+  if (playing && current?.action?.paused && current.action.loop === THREE.LoopOnce) setPlaying(false);
+  animate.sync();
 }
 $('#play').onclick = () => setPlaying(!playing);
 $('#scrub').oninput = () => {
   if (!current || !current.action) return;
+  if (animate.animationEditor.active) return animate.seek(parseFloat($('#scrub').value));
   setPlaying(false);
   current.action.time = parseFloat($('#scrub').value);
   updateMotion(0);
@@ -614,6 +630,7 @@ $('#scrub').oninput = () => {
 };
 $('#speed').onchange = () => { if (current) current.mixer.timeScale = parseFloat($('#speed').value); };
 document.addEventListener('keydown', e => {
+  if (recording) return;
   if (e.code === 'Space' && !['INPUT', 'SELECT'].includes(document.activeElement.tagName)) { e.preventDefault(); setPlaying(!playing); }
 });
 
@@ -745,6 +762,11 @@ $('#faceMouth').onchange = () => { if (mini) return miniPick(['mouth'], $('#face
 
 const _fq = new THREE.Quaternion(), _fe = new THREE.Euler();
 function applyFace() {
+  if (mini && $('#animationFace').checked && current?.action?.getClip().authorProject) {
+    mini.st = { ...sampleProject(current.action.getClip().authorProject, current.action.time).mini };
+    applyMiniFace();
+    return;
+  }
   if (!face || !faceBones) return;
   const motion = $('#animationFace').checked && current?.action ?
     animatedFace(current.action.getClip(), current.action.time) : null;
@@ -1233,7 +1255,7 @@ $('#sizeW').onchange = $('#sizeH').onchange = () => useSize(customSize(), true);
 // --- rendering frames ----------------------------------------------------------------------------
 
 /** Render what is inside the guide at (w x h) * ss. Returns straight-alpha RGBA, rows top-down. */
-function renderFrame(w, h, ss = 1) {
+function renderFrame(w, h, ss = 1, buffers = null) {
   applyAnimationCamera();
   props.updateProps();
   const RW = w * ss, RH = h * ss;
@@ -1243,27 +1265,33 @@ function renderFrame(w, h, ss = 1) {
   camera.setViewOffset(g.W, g.H, g.x, g.y, g.w, g.h);
   camera.updateProjectionMatrix();
   updateLight();
-  const rt = new THREE.WebGLRenderTarget(RW, RH, { samples: 4, stencilBuffer: true });
+  const rt = buffers?.rt || new THREE.WebGLRenderTarget(RW, RH, { samples: 4, stencilBuffer: true });
+  if (buffers) buffers.rt = rt;
   const bg = background();
-  placeBg(true);
-  props.gizmo(false);
-  pose.gizmo(false);
-  renderer.setRenderTarget(rt);
-  renderer.setClearColor(bg && bg !== 'picture' ? new THREE.Color(bg) : 0x000000, bg ? 1 : 0);
-  renderer.clear(true, true, true);
-  renderer.render(scene, camera);
-  props.gizmo(true);
-  pose.gizmo(true);
-  const px = new Uint8Array(RW * RH * 4);
-  renderer.readRenderTargetPixels(rt, 0, 0, RW, RH, px);
-  renderer.setRenderTarget(null);
-  renderer.setClearColor(0x000000, 0);
-  rt.dispose();
-  camera.clearViewOffset();
-  camera.aspect = savedAspect;
-  camera.updateProjectionMatrix();
+  const px = buffers?.px || new Uint8Array(RW * RH * 4);
+  if (buffers) buffers.px = px;
+  try {
+    placeBg(true);
+    props.gizmo(false);
+    pose.gizmo(false);
+    renderer.setRenderTarget(rt);
+    renderer.setClearColor(bg && bg !== 'picture' ? new THREE.Color(bg) : 0x000000, bg ? 1 : 0);
+    renderer.clear(true, true, true);
+    renderer.render(scene, camera);
+    renderer.readRenderTargetPixels(rt, 0, 0, RW, RH, px);
+  } finally {
+    props.gizmo(true);
+    pose.gizmo(true);
+    renderer.setRenderTarget(null);
+    renderer.setClearColor(0x000000, 0);
+    if (!buffers) rt.dispose();
+    camera.clearViewOffset();
+    camera.aspect = savedAspect;
+    camera.updateProjectionMatrix();
+  }
   // GL rows are bottom-up and MSAA edges come back premultiplied, ffs. fix both
-  const out = new Uint8ClampedArray(RW * RH * 4);
+  const out = buffers?.out || new Uint8ClampedArray(RW * RH * 4);
+  if (buffers) buffers.out = out;
   for (let y = 0; y < RH; y++) {
     const src = (RH - 1 - y) * RW * 4, dst = y * RW * 4;
     for (let x = 0; x < RW * 4; x += 4) {
@@ -1354,38 +1382,54 @@ chipGroup('#vidFmt', 'fmt', 'fmt', 'vidFmt');
 chipGroup('#vidFps', 'fps', 'fps', 'vidFps', Number);
 
 async function recordVideo() {
+  if (recording) return;
   if (!current || !current.action) return toast('Pick a pose to record first', true);
+  const settings = { ...video };
   let [w, h] = targetSize();
-  // GIFs this big would be enormous, and codecs want even sizes
-  if (video.fmt === 'gif') { const k = Math.min(1, 720 / Math.max(w, h)); w = Math.round(w * k); h = Math.round(h * k); }
+  if (settings.fmt === 'gif') { const k = Math.min(1, 720 / Math.max(w, h)); w = Math.round(w * k); h = Math.round(h * k); }
   w -= w % 2; h -= h % 2;
-  const fps = video.fmt === 'gif' ? Math.min(30, video.fps) : video.fps;
+  const fps = settings.fmt === 'gif' ? Math.min(30, settings.fps) : settings.fps;
   const clip = current.action.getClip();
-  const seconds = video.len === 'loop' ? clip.duration : Number(video.len);
+  const seconds = settings.len === 'loop' ? clip.duration : Number(settings.len);
   const frames = Math.max(1, Math.round(seconds * fps));
-  const { id } = await post('/api/video/start', { w, h, fps, format: video.fmt, name: fileName() });
-
-  recording = { cancel: false };
-  const wasPlaying = playing;
+  const controller = new AbortController(), signal = controller.signal;
+  recording = { cancel: false, controller };
+  const wasPlaying = playing, originalTime = current.action.time;
   setPlaying(false);
   $('#recBar').style.display = 'flex';
+  $('#recProg').value = 0;
+  $('#recText').textContent = 'Preparing export…';
   $('#record').disabled = $('#render').disabled = true;
-  const start = video.len === 'loop' ? 0 : current.action.time;
+  const start = settings.len === 'loop' ? 0 : originalTime;
   const step = 1 / fps;
-  // following moves the camera along the video, the view gets its own camera back after
   const view = { pos: camera.position.clone(), rotation: camera.quaternion.clone(), fov: camera.fov,
                  target: controls.target.clone(), at: follow.at?.clone(), root: follow.root };
+  const buffers = {};
+  const locked = $$('body > header, body > aside, .viewport > .areahead, #view, #player, #authorTimeline')
+    .map(element => [element, element.inert]);
+  locked.forEach(([element]) => { element.inert = true; });
+  const controlsEnabled = controls.enabled;
+  controls.enabled = false;
+  let id, encoder, pending = null;
+  const drain = async () => { if (pending) { const error = await pending; pending = null; if (error) throw error; } };
   try {
-    // the game steps its physics at 60 Hz, each frame shows the tick nearest its time
+    encoder = new FrameEncoder();
+    // Let any live physics request finish before taking over the skeleton.
+    while (stepping) { signal.throwIfAborted(); await pause(10); }
+    id = crypto.randomUUID().replaceAll('-', '');
+    // A caller-provided ID makes a lost start acknowledgement safe to retry.
+    await exportRequest('start', { id, w, h, fps, frames, transport: 'png', format: settings.fmt, name: fileName() }, signal);
+    const began = performance.now();
     const springs = current.springs?.enabled ? current.springs : null;
-    const poseAt = t => { current.action.time = (start + t) % clip.duration; updateMotion(0); updateTime(); applyProcess(); applyFace(); };
+    const poseAt = t => { current.action.time = clip.authorProject && !clip.authorProject.loop ?
+      Math.min(start + t, clip.duration) : (start + t) % clip.duration; updateMotion(0); updateTime(); applyProcess(); applyFace(); };
     let ticks = 0;
-    if (springs) { springs.reset(); poseAt(0); await springs.step(); }
+    if (springs) { springs.reset(); poseAt(0); await springs.step(1, signal); }
     for (let i = 0; i < frames; i++) {
-      if (recording.cancel) throw new Error('cancelled');
+      signal.throwIfAborted();
       if (springs) {
         const target = Math.round(i * step / TICK);
-        while (ticks < target) { ticks++; poseAt(ticks * TICK); await springs.step(); }
+        while (ticks < target) { ticks++; poseAt(ticks * TICK); await springs.step(1, signal); }
       } else poseAt(i * step);
       current.root.updateMatrixWorld(true);
       const cut = rootJumped();
@@ -1393,27 +1437,53 @@ async function recordVideo() {
       applyHeadTurn(i === 0 ? 0 : step);
       applyEyeTrace(i === 0 ? 0 : step);
       props.updateProps();
-      const frame = renderFrame(w, h, 1);
-      // a local request can still drop now and then, one lost frame shouldn't end the video
-      for (let tries = 3; ; tries--) {
-        try {
-          await call(`/api/video/frame?id=${id}`, { method: 'POST', headers: { 'X-Studio': '1' }, body: frame.data }, null);
-          break;
-        } catch (e) {
-          if (tries <= 1) throw e;
-          await new Promise(r => setTimeout(r, 300));
-        }
-      }
+      const frame = renderFrame(w, h, 1, buffers);
+      // Transfer ownership to the compression worker, then reuse the returned
+      // buffer. No raw-frame copies or main-thread idle-time PNG encoding.
+      const encoded = await encoder.encode(frame.data, w, h, signal);
+      buffers.out = new Uint8ClampedArray(encoded.pixels);
+      await drain();
+      signal.throwIfAborted();
+      // One upload overlaps the next frame. Handle rejection immediately and
+      // bound retained frame data even if the encoder is slower than rendering.
+      pending = uploadFrame(id, i, encoded.blob, signal).then(() => null, error => error);
       $('#recProg').value = (i + 1) / frames;
-      $('#recText').textContent = `${i + 1} / ${frames}`;
+      $('#recText').textContent = progressText(i + 1, frames, (performance.now() - began) / 1000);
     }
-    $('#recText').textContent = 'encoding…';
-    await post('/api/video/finish', { id });
-    toast(video.fmt === 'png' ? `Saved ${frames} PNG frames` : `Saved ${seconds.toFixed(1)} s ${video.fmt.toUpperCase()} video`, false, ['Show', openSaved]);
+    await drain();
+    let status = await exportRequest('finish', { id }, signal);
+    while (status.state !== 'done') {
+      if (status.state === 'error') throw new Error(status.error);
+      if (status.state === 'cancelled') throw new Error('Export was cancelled.');
+      $('#recText').textContent = `Encoding ${status.encoded} / ${frames} · ${status.elapsed} s elapsed`;
+      await pause(250);
+      status = await exportRequest('status', { id }, signal);
+    }
+    toast(settings.fmt === 'png' ? `Saved ${frames} PNG frames` :
+      `Saved ${seconds.toFixed(1)} s ${settings.fmt.toUpperCase()} video`, false, ['Show', openSaved]);
   } catch (e) {
-    await post('/api/video/finish', { id, cancel: true }).catch(() => {});
-    if (e.message !== 'cancelled') toast(e.message, true);
+    if (id) {
+      try {
+        $('#recText').textContent = 'Stopping export…';
+        let status = await exportRequest('finish', { id, cancel: true });
+        const until = performance.now() + 15000;
+        while (!['done', 'cancelled', 'error'].includes(status.state) && performance.now() < until) {
+          await pause(100); status = await exportRequest('status', { id });
+        }
+      } catch (cleanupError) { console.warn('Export cleanup:', cleanupError); }
+    }
+    if (!recording.cancel) toast(e.message, true);
+    else toast('Export cancelled');
   } finally {
+    controller.abort();
+    if (pending) await pending;
+    buffers.rt?.dispose();
+    encoder?.close();
+    locked.forEach(([element, wasInert]) => { element.inert = wasInert; });
+    controls.enabled = controlsEnabled;
+    current.action.time = originalTime;
+    updateMotion(0); applyProcess(); applyFace(); updateTime();
+    current.springs?.reset();
     camera.position.copy(view.pos);
     camera.quaternion.copy(view.rotation);
     camera.fov = view.fov;
@@ -1428,7 +1498,10 @@ async function recordVideo() {
   }
 }
 $('#record').onclick = () => recordVideo().catch(e => toast(e.message, true));
-$('#recCancel').onclick = () => { if (recording) recording.cancel = true; };
+$('#recCancel').onclick = () => {
+  if (recording) { recording.cancel = true; recording.controller?.abort(); }
+};
+
 
 // --- model export ------------------------------------------------------------------------------
 //
@@ -1511,25 +1584,26 @@ function exportMaterial(m) {
 
 async function bakeMotion(nodes) {
   const clip = current.action.getClip();
-  const frames = Math.max(2, Math.round(clip.duration * EXPORT_FPS));
+  const frames = Math.max(2, clip.authorProject ? Math.ceil(clip.duration * EXPORT_FPS) + 1 : Math.round(clip.duration * EXPORT_FPS));
   const step = 1 / EXPORT_FPS;
+  const sampleTimes = Array.from({ length: frames }, (_, i) => clip.authorProject ? Math.min(i * step, clip.duration) : i * step);
   const keys = nodes.map(() => ({ p: [], q: [], s: [] }));
   const springs = current.springs?.enabled ? current.springs : null;
-  const poseAt = t => { current.action.time = t % clip.duration; updateMotion(0); applyProcess(); applyFace(); };
+  const poseAt = t => { current.action.time = clip.authorProject ? Math.min(t, clip.duration) : t % clip.duration; updateMotion(0); applyProcess(); applyFace(); };
   let ticks = 0;
   if (springs) { springs.reset(); poseAt(0); await springs.step(); }
   for (let i = 0; i < frames; i++) {
     if (springs) {
-      const target = Math.round(i * step / TICK);
+      const target = Math.round(sampleTimes[i] / TICK);
       while (ticks < target) { ticks++; poseAt(ticks * TICK); await springs.step(); }
-    } else poseAt(i * step);
+    } else poseAt(sampleTimes[i]);
     current.root.updateMatrixWorld(true);
     applyHeadTurn(i === 0 ? 0 : step);
     applyEyeTrace(i === 0 ? 0 : step);
     props.updateProps();
     nodes.forEach((n, k) => { keys[k].p.push(...n.position.toArray()); keys[k].q.push(...n.quaternion.toArray()); keys[k].s.push(...n.scale.toArray()); });
   }
-  const times = Float32Array.from({ length: frames }, (_, i) => i * step);
+  const times = Float32Array.from(sampleTimes);
   const moves = v => v.some((x, i) => Math.abs(x - v[i % (v.length / frames)]) > 1e-5);
   const tracks = [];
   nodes.forEach((n, k) => {
@@ -1537,7 +1611,7 @@ async function bakeMotion(nodes) {
     if (moves(keys[k].q)) tracks.push(new THREE.QuaternionKeyframeTrack(`${n.name}.quaternion`, times, keys[k].q));
     if (moves(keys[k].s)) tracks.push(new THREE.VectorKeyframeTrack(`${n.name}.scale`, times, keys[k].s));
   });
-  return new THREE.AnimationClip(poseTitle.replace(`${current.name} · `, '') || 'motion', frames * step, tracks);
+  return new THREE.AnimationClip(poseTitle.replace(`${current.name} · `, '') || 'motion', clip.authorProject ? clip.duration : frames * step, tracks);
 }
 
 async function exportModel() {
@@ -1660,12 +1734,39 @@ async function followWarmUp() {
   $('#warm').textContent = '';
 }
 
-pose.initPose({ scene, camera, canvas, controls, pauseMotion: () => { const resume = playing; setPlaying(false); return () => setPlaying(resume); }, onPick: () => props.propsDebug.select(null) });
+pose.initPose({ scene, camera, canvas, controls,
+  pauseMotion: () => { const resume = playing && !animate.animationEditor.active; setPlaying(false); return () => setPlaying(resume); },
+  onEdit: animate.markDraft, onPick: () => props.propsDebug.select(null) });
+animate.initAnimate({
+  current: () => current, locked: () => !!recording,
+  rig: () => {
+    const bones = [], indices = new Map();
+    current.root.traverse(o => {
+      if (!current.rest.has(o)) return;
+      const [p, q, s] = current.rest.get(o), index = bones.length;
+      indices.set(o, index);
+      bones.push({ name: o.name, index, parent: indices.get(o.parent) ?? -1,
+        p: [-p.x, p.y, p.z], q: [q.x, -q.y, -q.z, q.w], s: s.toArray() });
+    });
+    return bones;
+  },
+  pause: () => setPlaying(false),
+  play: clip => { ++playRequest; return playClip(clip, 'custom-animation', false, clip.name); },
+  seek: t => {
+    if (!current?.action) return;
+    current.action.time = t; current.action.enabled = true;
+    updateMotion(0); applyProcess(); applyFace(); current.springs?.reset(); updateTime();
+  },
+  face: () => ({
+    face: Object.fromEntries(Object.entries(faceState).map(([ch, value]) => [ch, parseParts(value)])),
+    mini: mini?.st ? Object.fromEntries(['eye_l', 'eye_r', 'brow_l', 'brow_r', 'mouth', 'cheek'].map(k => [k, mini.st[k] || 0])) : null,
+  }),
+});
 props.initProps({ scene, camera, renderer, controls, canvas, current: () => current, libraryClip, buildClip, updateMotion,
                   idle: () => !!current && !recording && !pointerHeld });
 
 window.studio = { scene, camera, controls, setCamera, setFace, savePNG, recordVideo, exportModel, chooseUma, get charas() { return charas; },
-                  get current() { return current; }, video, shot, props: props.propsDebug, pose: pose.poseDebug, bgPic,
+                  get current() { return current; }, video, shot, props: props.propsDebug, pose: pose.poseDebug, animation: animate.animationEditor, bgPic,
                   // for scripted shots: pause the live loop and pose / render frames by hand
                   script: { renderFrame, libraryClip, ownClip, applyFace, applyProcess, faceState, updateProps: props.updateProps, TICK,
                             freeze(on) { recording = on ? { cancel: false } : null; } } };

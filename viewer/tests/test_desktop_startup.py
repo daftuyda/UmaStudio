@@ -64,8 +64,9 @@ class DesktopStartupTests(unittest.TestCase):
     def test_earlier_preview_with_same_version_is_not_reused(self):
         with patch.object(serve.urllib.request, "urlopen") as urlopen:
             response = urlopen.return_value.__enter__.return_value
-            response.read.return_value = json.dumps({**serve.instance_info(), "ui": "region-settings"}).encode()
-            self.assertFalse(serve.matching_instance("http://127.0.0.1:27620"))
+            for ui in ("region-settings", "smooth-surface-collisions", "animation-editor-v1", "animation-import-v2"):
+                response.read.return_value = json.dumps({**serve.instance_info(), "ui": ui}).encode()
+                self.assertFalse(serve.matching_instance("http://127.0.0.1:27620"))
 
 
 if __name__ == "__main__":

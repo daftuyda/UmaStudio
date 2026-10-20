@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { sampleProject } from '/static/animation-project.js';
 
 /** One scrub/export timeline, with hard shot boundaries and rest values for
  * properties missing from a shot. No crossfade between unrelated camera cuts. */
@@ -44,6 +45,7 @@ export function segmentAt(clip, time) {
 
 /** Sample companion facial weights on the same timebase as the body. */
 export function animatedFace(clip, time) {
+  if (clip?.authorProject) return sampleProject(clip.authorProject, time).face;
   const segment = segmentAt(clip, time);
   const motion = segment ? segment.clip.faceMotion : clip?.faceMotion;
   if (!motion?.tracks.length) return null;

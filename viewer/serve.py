@@ -41,19 +41,25 @@ for _stream in (sys.stdout, sys.stderr):
 HERE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import gamepaths  # noqa: E402
+from animation_projects import save_project
+from animation_imports import ImportManager
+from video_exports import ExportManager
 # loaded by boot() once the window is up. they pull in UnityPy and numpy, which take a couple
 # of seconds.
 cyspring = motionnames = offline = story = umaconv = umadata = None
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 PORT = 27620
 CONFIG = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "UmaStudio")   # = umadata.CONFIG
+_animation_importer = ImportManager(os.path.join(CONFIG, "animation-import"),
+                                    os.path.join(HERE, "unity", "Editor", "UmaAnimationImport.cs"))
 ROOT = os.path.join(os.path.expanduser("~"), "Pictures", "UmaStudio")
 PACKS = os.path.join(ROOT, "packs")
 BUNDLES = os.path.join(ROOT, "bundles")
 CACHE = os.path.join(ROOT, "viewer-cache")
 RENDERS = os.path.join(ROOT, "renders")
 IMAGES = os.path.join(ROOT, "images")
+ANIMATIONS = os.path.join(ROOT, "animations")
 LIBRARY_DIR = os.path.join(CACHE, "_library")
 ICONS = os.path.join(CACHE, "_icons")
 PROPS = os.path.join(CACHE, "_props")
@@ -96,7 +102,7 @@ def change_source(body):
     global DATA, _generation
     if not _boot["done"]:
         raise ValueError("Game files are still loading. Try again when loading finishes.")
-    if _videos or _encoding[0]:
+    if _exports.active():
         raise ValueError("Finish or cancel the current video export before switching games.")
     game, data = gamepaths.configure(body.get("region", gamepaths.region()),
                                     body.get("game", ""), body.get("data", ""), body.get("path"))
@@ -212,16 +218,21 @@ def spring_new(pack, nodes):
         raise ValueError("no physics for that character")
     sim = cyspring.Simulation(json.load(open(path, encoding="utf-8")), nodes)
     sid = uuid.uuid4().hex[:12]
-    _springs[sid] = (sim, threading.Lock())
+    _springs[sid] = (sim, threading.Lock(), {})
     while len(_springs) > 4:
         _springs.pop(next(iter(_springs)))
     return {"id": sid, **sim.describe()}
 
 
-def spring_step(sid, raw):
-    sim, lock = _springs[sid]
+def spring_step(sid, raw, request_id=None):
+    sim, lock, previous = _springs[sid]
     with lock:
-        return sim.step(raw)
+        # Retry a dropped response without advancing physics twice.
+        if request_id is not None and previous.get("id") == request_id:
+            return previous["data"]
+        result = sim.step(raw)
+        previous.update(id=request_id, data=result)
+        return result
 
 
 # --- story scenes ---------------------------------------------------------------------------
@@ -618,20 +629,10 @@ def warm_jobs():
 
 # --- video ------------------------------------------------------------------------------------
 #
-# the page renders each frame at a fixed time step and posts raw RGBA, frames stream straight
-# into ffmpeg's stdin so nothing piles up on disk.
+# The page renders at a fixed time step and transfers lossless PNG frames.
+# A bounded worker queue streams to ffmpeg without blocking HTTP handlers.
 
-FORMATS = {
-    "mp4": ("mp4", ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16", "-preset", "medium", "-movflags", "+faststart"]),
-    "webm": ("webm", ["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", "24", "-row-mt", "1",
-                      "-auto-alt-ref", "0"]),
-    "mov": ("mov", ["-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le", "-vendor", "apl0"]),
-    "gif": ("gif", ["-filter_complex", "[0:v]split[a][b];[a]palettegen=reserve_transparent=1:stats_mode=diff[p];"
-                    "[b][p]paletteuse=dither=bayer:bayer_scale=3:alpha_threshold=128"]),
-}
-_videos = {}
-_encoding = [0]            # videos ffmpeg is still finishing
-
+_exports = ExportManager()
 
 def unique(path):
     stem, ext = os.path.splitext(path)
@@ -646,73 +647,6 @@ def find_ffmpeg():
     beside = os.path.join(os.path.dirname(sys.executable), "ffmpeg.exe")
     return beside if os.path.exists(beside) else shutil.which("ffmpeg")
 
-
-def video_start(w, h, fps, fmt, name):
-    os.makedirs(RENDERS, exist_ok=True)
-    safe = re.sub(r"[^\w\-. ]", "_", name)[:120]
-    vid = uuid.uuid4().hex
-    if fmt == "png":
-        # frames as numbered PNGs in their own folder, no ffmpeg involved
-        folder = unique(os.path.join(RENDERS, safe))
-        os.makedirs(folder)
-        _videos[vid] = {"dir": folder, "w": w, "h": h, "n": 0, "size": w * h * 4}
-        return vid
-    ffmpeg = find_ffmpeg()
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg is needed for video: run  winget install ffmpeg  and restart UmaStudio")
-    ext, args = FORMATS[fmt]
-    path = unique(os.path.join(RENDERS, safe + "." + ext))
-    log = open(os.path.join(CACHE, "ffmpeg.log"), "wb")
-    proc = subprocess.Popen([ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba",
-                             "-s", f"{w}x{h}", "-r", str(fps), "-i", "-", *args, path],
-                            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log,
-                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    _videos[vid] = {"proc": proc, "path": path, "size": w * h * 4, "log": log}
-    return vid
-
-
-def video_frame(vid, data):
-    v = _videos[vid]
-    if len(data) != v["size"]:
-        raise ValueError("frame has the wrong size")
-    if "dir" in v:
-        from PIL import Image
-        v["n"] += 1
-        Image.frombuffer("RGBA", (v["w"], v["h"]), data, "raw", "RGBA", 0, 1).save(
-            os.path.join(v["dir"], f"{os.path.basename(v['dir'])} {v['n']:04d}.png"), compress_level=3)
-        return
-    v["proc"].stdin.write(data)
-
-
-def video_finish(vid, cancel=False):
-    v = _videos.pop(vid)
-    if "dir" in v:
-        if cancel:
-            shutil.rmtree(v["dir"], ignore_errors=True)
-            return None
-        return v["dir"]
-    proc = v["proc"]
-    _encoding[0] += 1
-    try:
-        if cancel:
-            proc.kill()
-            proc.wait(timeout=30)
-        else:
-            proc.stdin.close()
-            proc.wait(timeout=900)
-    finally:
-        _encoding[0] -= 1
-        v["log"].close()
-    if cancel:
-        try:
-            os.remove(v["path"])
-        except OSError:
-            pass
-        return None
-    if proc.returncode != 0:
-        err = open(os.path.join(CACHE, "ffmpeg.log"), encoding="utf-8", errors="replace").read()[-400:]
-        raise RuntimeError("ffmpeg failed: " + err)
-    return v["path"]
 
 
 def export_save(name, data):
@@ -758,7 +692,7 @@ def watchdog():
     """In app mode, stop once the window has been closed (it pings every few seconds)."""
     while True:
         time.sleep(5)
-        if time.time() - _last_ping[0] > 40 and not _videos and not _encoding[0]:
+        if time.time() - _last_ping[0] > 40 and not _exports.active():
             os._exit(0)
 
 
@@ -798,6 +732,11 @@ def safe_join(base, rel):
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Export makes hundreds of local requests. Reuse connections and send small
+    # physics replies immediately instead of paying Windows connection setup per tick.
+    protocol_version = "HTTP/1.1"
+    disable_nagle_algorithm = True
+
     def log_message(self, fmt, *args):
         pass
 
@@ -860,8 +799,14 @@ class Handler(BaseHTTPRequestHandler):
                     self._get()
 
     def do_POST(self):
-        with serving(), _source_lock:
-            self._post()
+        with serving():
+            # Job methods synchronize their own queues. Never hold the game lock
+            # across uploads, cancellation or encoder status requests.
+            if urlparse(self.path).path in ("/api/video/frame", "/api/video/finish", "/api/video/status"):
+                self._post()
+            else:
+                with _source_lock:
+                    self._post()
 
     def _get(self):
         if not self._host_ok():
@@ -953,13 +898,14 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         try:
             if self.path.startswith("/api/video/frame"):
-                video_frame(parse_qs(urlparse(self.path).query)["id"][0], raw)
-                return self._send(200, {"ok": True})
+                query = parse_qs(urlparse(self.path).query)
+                result = _exports.get(query["id"][0]).frame(int(query["index"][0]), raw)
+                return self._send(200, {"ok": True, **result})
             if self.path.startswith("/api/spring/step"):
                 sid = parse_qs(urlparse(self.path).query)["id"][0]
                 if sid not in _springs:
                     return self._send(410, {"error": "simulation gone"})
-                return self._send(200, spring_step(sid, raw), "application/octet-stream")
+                return self._send(200, spring_step(sid, raw, self.headers.get("X-Step-ID")), "application/octet-stream")
             if self.path.startswith("/api/export"):
                 name = parse_qs(urlparse(self.path).query).get("name", ["model"])[0]
                 return self._send(200, {"ok": True, "path": export_save(name, raw)})
@@ -967,12 +913,22 @@ class Handler(BaseHTTPRequestHandler):
                 name = parse_qs(urlparse(self.path).query).get("name", ["image"])[0]
                 return self._send(200, {"ok": True, "file": image_save(name, raw)})
             body = json.loads(raw or b"{}")
+            if self.path == "/api/animation/import":
+                return self._send(200, {"ok": True, **_animation_importer.start(body)})
+            if self.path == "/api/animation/import/status":
+                return self._send(200, {"ok": True, **_animation_importer.status(body.get("id", ""))})
+            if self.path == "/api/animation-project/save":
+                return self._send(200, {"ok": True, "path": save_project(ANIMATIONS, body)})
             if self.path == "/api/video/start":
-                vid = video_start(int(body["w"]), int(body["h"]), int(body["fps"]), body["format"], body.get("name", "video"))
+                vid = _exports.start(RENDERS, os.path.join(CACHE, "exports"), find_ffmpeg(),
+                                     int(body["w"]), int(body["h"]), int(body["fps"]), body["format"],
+                                     body.get("name", "video"), int(body["frames"]), body.get("transport", "rgba"), body.get("id"))
                 return self._send(200, {"ok": True, "id": vid})
             if self.path == "/api/video/finish":
-                path = video_finish(body["id"], cancel=bool(body.get("cancel")))
-                return self._send(200, {"ok": True, "path": path})
+                result = _exports.get(body["id"]).finish(cancel=bool(body.get("cancel")))
+                return self._send(200, {"ok": True, **result})
+            if self.path == "/api/video/status":
+                return self._send(200, {"ok": True, **_exports.get(body["id"]).status()})
             if self.path == "/api/load":
                 name, manifest = load(int(body["chara"]), int(body["dress"]))
                 return self._send(200, {"ok": True, "pack": name, "manifest": manifest, "sets": own_sets(manifest)})
@@ -1014,7 +970,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/game/browse":
                 return self._send(200, {"ok": True, "path": browse_folder()})
             if self.path == "/api/open":
-                target = {"renders": RENDERS, "images": IMAGES}.get(body.get("what"), ROOT)
+                target = {"renders": RENDERS, "images": IMAGES, "animations": ANIMATIONS}.get(body.get("what"), ROOT)
                 os.makedirs(target, exist_ok=True)
                 subprocess.Popen(["explorer", target])
                 return self._send(200, {"ok": True})
@@ -1027,7 +983,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def instance_info():
-    return {"app": "UmaStudio", "version": VERSION, "ui": "smooth-surface-collisions"}
+    return {"app": "UmaStudio", "version": VERSION, "ui": "streaming-export-v3"}
 
 
 class StudioServer(ThreadingHTTPServer):
@@ -1095,14 +1051,7 @@ def main():
         return
     threading.Thread(target=server.serve_forever, daemon=True).start()
     if native_window(url):
-        # closed: a recording cut short is dropped, one already encoding finishes first
-        for vid in list(_videos):
-            try:
-                video_finish(vid, cancel=True)
-            except Exception:
-                pass
-        while _encoding[0]:
-            time.sleep(0.5)
+        _exports.close()
         os._exit(0)
     threading.Thread(target=watchdog, daemon=True).start()
     open_window(url)

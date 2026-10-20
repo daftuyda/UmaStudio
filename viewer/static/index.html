@@ -142,8 +142,10 @@ canvas#view { width: 100%; height: 100%; display: block; outline: none; }
 #frameGuide { position: absolute; border: 1px solid rgba(255,255,255,.35); pointer-events: none; box-shadow: 0 0 0 9999px rgba(0,0,0,.3); display: none; }
 #overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dim); pointer-events: none; font-size: 14px; text-align: center; padding: 30px; }
 #recBar { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); display: none; align-items: center; gap: 10px;
+  width: max-content; max-width: calc(100% - 24px); flex-wrap: wrap; justify-content: center;
   padding: 4px 6px 4px 12px; border-radius: var(--r); background: var(--head); border: 1px solid #6b3434; }
-#recBar progress { width: 220px; accent-color: var(--sel); }
+#recBar progress { width: 120px; accent-color: var(--sel); }
+#recText { font-variant-numeric: tabular-nums; }
 #recBar span:first-child::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #d64a4a; margin-right: 7px; }
 
 /* the timeline, docked under the view */
@@ -269,6 +271,19 @@ dialog#settings { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh 
 #settingsError { color: var(--bad); min-height: 18px; margin: 12px 0; }
 #settingsBtn { margin-left: auto; }
 </style>
+<style>
+#authorTimeline { flex: none; padding: 6px 12px; background: var(--head); border-top: 1px solid var(--gap); }
+#animNote { overflow-wrap: anywhere; }
+#animKeys { position: relative; height: 28px; margin: 3px 9px; border-bottom: 1px solid var(--edge);
+  background: repeating-linear-gradient(90deg, transparent 0, transparent calc(10% - 1px), #484848 calc(10% - 1px), #484848 10%); }
+.keyframe { position: absolute; transform: translateX(-50%); top: 3px; border: 0; padding: 0 3px; background: transparent; color: #e2b564; cursor: pointer; }
+.keyframe.selected { color: white; background: var(--sel); border-radius: 3px; }
+#animCursor { position: absolute; height: 28px; width: 1px; background: #77adff; pointer-events: none; }
+#animTools { border: 0; margin: 0; padding: 0; min-width: 0; }
+#animTools:disabled { opacity: .5; }
+#authorTimeline .line { flex-wrap: wrap; }
+#animSeek, #animKeyTime { width: 68px; }
+</style>
 <script type="importmap">
 { "imports": { "three": "/static/vendor/three.module.js", "three/addons/": "/static/vendor/addons/" } }
 </script>
@@ -334,6 +349,17 @@ dialog#settings { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh 
       <br><span class="hint">This continues by itself once the files can be read.</span>
     </div></div>
   </div>
+  <div id="authorTimeline" hidden>
+    <div class="line">
+      <b>Animate</b><span class="grow hint" id="animClock"></span>
+      <button class="b" id="animPrev" title="Previous frame">−1 frame</button>
+      <input class="field" type="number" id="animSeek" min="0" max="120" step="0.033333" value="0" title="Seek to seconds" aria-label="Seek to seconds">
+      <button class="b" id="animNext" title="Next frame">+1 frame</button>
+      <button class="b" id="animAdd">Add / update keyframe</button>
+    </div>
+    <div id="animKeys" aria-label="Animation keyframes"></div>
+    <div style="position:relative;margin:-31px 9px 3px;height:28px;pointer-events:none"><div id="animCursor"></div></div>
+  </div>
   <div id="player">
     <button id="play" title="Play / pause (space)">▶</button>
     <span id="time">0.00s</span>
@@ -395,6 +421,62 @@ dialog#settings { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh 
           <div class="hint">A saved pose keeps your joint changes. Loading puts them on top of whatever motion is playing.</div>
         </div>
       </details>
+    </div>
+
+    <div class="page" data-tab="animate" hidden>
+      <details class="panel" open>
+        <summary>Custom animation</summary>
+        <div class="body">
+          <div class="line"><button class="b" id="animNew">New animation</button><button class="b" id="animOpen">Open…</button></div>
+          <input id="animFile" type="file" accept=".json,.umaanim" hidden>
+          <button class="b" id="animImport">Import Unity .anim…</button>
+          <input id="animImportFile" type="file" accept=".anim" hidden>
+          <div class="hint">Humanoid import uses an installed Unity Editor in the background. Saved converted projects play without Unity.</div>
+          <details><summary class="hint">Unity location (optional)</summary>
+            <input class="field" style="width:100%" type="text" id="animUnity" placeholder="Auto-detect Unity.exe" aria-label="Unity Editor executable path">
+          </details>
+          <div class="hint" id="animImportStatus" style="overflow-wrap:anywhere"></div>
+          <button class="b" id="animResume" hidden>Resume project</button>
+          <div class="hint">Start with a neutral pose. Use Pose for joints and fingers, and Face for expressions. Add keyframes along the bottom timeline.</div>
+        </div>
+      </details>
+      <div id="animWork" hidden>
+        <details class="panel" open>
+          <summary>Project</summary>
+          <div class="body">
+            <div class="hint" id="animSource" hidden></div>
+            <input class="field" type="text" id="animName" maxlength="100" aria-label="Animation name">
+            <div class="prop"><span>Duration (s)</span><input class="field" type="number" id="animDuration" min="0.034" max="120" step="0.1"></div>
+            <div class="prop"><span>Frame rate</span><select class="field" id="animFps"><option value="30">30 fps</option><option value="60">60 fps</option></select></div>
+            <label class="check"><input type="checkbox" id="animLoop">Loop playback</label>
+            <button class="b" id="animApply">Apply project settings</button>
+            <div class="line"><button class="b" id="animSave">Save project</button><button class="b" id="animUndo">Undo edit</button></div>
+            <div class="hint">Keyframes are kept as a local draft. Save a project file to keep or share it. Render exports the active animation to video or animated GLB.</div>
+          </div>
+        </details>
+        <fieldset id="animTools">
+          <details class="panel" open>
+            <summary>Pose and movement</summary>
+            <div class="body">
+              <div class="line"><button class="b" id="animPose">Pose / fingers</button><button class="b" id="animFace">Expression</button></div>
+              <div class="hint">Character movement in metres, relative to its starting position.</div>
+              <div class="prop"><span>Sideways X</span><input class="field" type="number" id="animX" min="-100" max="100" step="0.01"></div>
+              <div class="prop"><span>Height Y</span><input class="field" type="number" id="animY" min="-100" max="100" step="0.01"></div>
+              <div class="prop"><span>Forward Z</span><input class="field" type="number" id="animZ" min="-100" max="100" step="0.01"></div>
+              <div class="hint" id="animNote"></div>
+            </div>
+          </details>
+          <details class="panel" open>
+            <summary>Selected keyframe</summary>
+            <div class="body">
+              <div class="line"><input class="field" type="number" id="animKeyTime" min="0" max="120" step="0.033333" aria-label="Selected keyframe time"><span class="hint grow">seconds</span><button class="b" id="animMove">Move</button></div>
+              <div class="prop"><span>Transition out</span><select class="field" id="animEase"><option value="smooth">Smooth</option><option value="linear">Linear</option><option value="hold">Hold</option></select></div>
+              <div class="line"><button class="b" id="animCopy">Copy</button><button class="b" id="animPaste">Paste at playhead</button><button class="b" id="animDelete">Delete</button></div>
+              <div class="hint">Each keyframe stores the full pose and expression. For a seamless loop, copy the first keyframe to the end.</div>
+            </div>
+          </details>
+        </fieldset>
+      </div>
     </div>
 
     <div class="page" data-tab="props" hidden>
@@ -559,6 +641,7 @@ dialog#settings { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh 
   <nav class="tabs">
     <button data-tab="face">Face</button>
     <button data-tab="pose">Pose</button>
+    <button data-tab="animate">Animate</button>
     <button data-tab="props">Props</button>
     <button data-tab="render">Render</button>
     <button data-tab="look">Look</button>

@@ -32,7 +32,8 @@ const ordered = await loading.mapLimited([4, 1, 3, 2], 2, async n => {
 assert.deepEqual(ordered, [8, 2, 6, 4]);
 assert.equal(peak, 2);
 const three = await mod('../static/vendor/three.module.js');
-const sequence = await mod('../static/sequence.js', () => three);
+const project = await mod('../static/animation-project.js', () => three);
+const sequence = await mod('../static/sequence.js', name => name === 'three' ? three : project);
 const { propPlans, propFrame, setupKey } = (await mod('../static/animation-props.js', () => sequence)).namespace;
 const a = { sourcePath: '3d/motion/a', propSetup: [{ name: 'book' }] };
 const b = { sourcePath: '3d/motion/b', propSetup: [] };

@@ -40,7 +40,7 @@ export async function call(url, opts, label = GENERIC) {
   const run = async () => {
     const options = gameSource ? { ...opts, headers: { ...opts?.headers, 'X-Game-Source': gameSource } } : opts;
     const r = await fetch(url, options);
-    const j = await r.json().catch(() => ({}));
+    const j = await r.json().catch(e => { if (e instanceof TypeError || e.name === 'AbortError') throw e; return {}; });
     if (!r.ok || j.ok === false) throw new Error(j.error || r.statusText);
     return j;
   };

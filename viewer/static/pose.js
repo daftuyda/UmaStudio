@@ -98,6 +98,12 @@ function select(b) {
 }
 
 function snapshot() { return new Map([...edits].map(([k, q]) => [k, q.clone()])); }
+export function clearDraft() {
+  restore(new Map());
+  undoStack.length = 0;
+}
+export function offsets() { return snapshot(); }
+export function showJoints() { setShowing(true); }
 function remember() {
   undoStack.push(snapshot());
   if (undoStack.length > 60) undoStack.shift();
@@ -120,6 +126,7 @@ function fromProxy() {
   _q.copy(drag.proxy).invert().multiply(proxy.quaternion);
   edits.set(selected.name, drag.offset.clone().multiply(_q).normalize());
   refreshCount();
+  ctx.onEdit?.();
 }
 
 /** A new character: same bone names, so the edits carry over. */

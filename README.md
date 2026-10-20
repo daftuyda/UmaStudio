@@ -14,7 +14,7 @@ Website and guide: https://umastudio.byharuki.dev
 1. Get `UmaStudio-<version>.zip` from [this fork's Releases](https://github.com/daftuyda/UmaStudio/releases/latest).
 2. Extract it anywhere and run `UmaStudio/UmaStudio.exe`.
 
-See the [0.1.2 change summary](docs/releases/0.1.2.md). The original project is
+See the [0.1.3 change summary](docs/releases/0.1.3.md). The original project is
 [oHaruki/UmaStudio](https://github.com/oHaruki/UmaStudio).
 
 You need:
@@ -47,6 +47,33 @@ the first time you open her, after that she loads from the cache.
   motion, so pictures, videos and exports keep them. Hold **Shift** while dragging for fine
   adjustments; playback pauses until you release the ring. **Reset joint** and **Reset all**
   restore the underlying animation pose. Poses can be saved and loaded.
+- **Animate**: create a custom animation from a neutral pose. Move the bottom playhead,
+  adjust joints/fingers in **Pose**, choose an expression in **Face**, then click
+  **Add / update keyframe**. Character movement is available in the Animate panel.
+  Click a diamond to select a full-pose keyframe; copy/paste, move it by its time field,
+  delete it, or choose **Smooth**, **Linear**, or **Hold** for its outgoing transition.
+  **Undo edit** restores project changes. Playback can loop or stop on the final pose.
+  **Apply project settings** sets the name, duration (up to 120 seconds), frame rate
+  (30 or 60 fps), and looping. Copy the first keyframe to the end for a seamless loop.
+  **Save project** writes an editable `.umaanim` file; **Open** loads it, and
+  **Resume project** returns to the local draft after browsing game animations or restarting.
+  Seeking or starting playback clears changes that have not been added to a keyframe.
+  Hair/clothing physics run over the authored body pose. The Render tab exports the active
+  animation as video or animated GLB. Projects reuse compatible skeleton names across outfits;
+  full-size and chibi projects remain separate. Chibi expressions change as held tiles, and
+  animated chibi face tiles are visible in video but are not carried into GLB.
+  **Import Unity .anim** loads Unity Humanoid animations onto a full-size Uma. Importing uses
+  a locally installed Unity Editor (tested with 2022.3), detected automatically from Unity Hub;
+  use **Unity location** for other installations. The converter works in its own private project
+  and leaves the original animation untouched. Body/finger motion is retargeted to the selected
+  character and sampled at 60 fps. Existing `.anim` files with generic/legacy bone curves,
+  FBX/BVH, prop animation, and imported facial controls are not supported by this importer.
+  Imported motion stays underneath your correction keyframes, so joint changes and expressions
+  can be edited without replacing the dance. Save the resulting `.umaanim` project to embed the
+  converted motion; reopening, playing, editing and exporting it needs no Unity installation.
+  Reimport for the best fit when changing to a character with different proportions.
+  The first conversion may take a few minutes; subsequent imports for the same skeleton are cached.
+  Camera/prop keyframes and foot locking are not included yet.
 - **Props**: one of the game's hand props, or your own picture as a card or a box. A picture can
   also go on a game prop. Drag the handles in the view to place it.
   **Load animation props automatically** reads supported game associations and cut-in
@@ -58,6 +85,9 @@ the first time you open her, after that she loads from the cache.
   PNG size (presets or your own), video (MP4, transparent WebM, MOV for editing, transparent GIF,
   or numbered PNG frames), and **Export for Blender**: her mesh, skeleton, textures and props as
   a .glb, in the current pose or with the motion baked in.
+  Video exports show speed, elapsed time and an estimate of time remaining. Cancel works
+  during rendering and encoding and removes the unfinished output. Frames use lossless
+  compressed transfer, and GIFs stream without keeping the whole animation in memory.
 - **Look**: light, shadow size, outlines, hair and cloth physics. **Body & clothing
   collisions** keeps simulated hair, ties and other loose pieces outside the posed body
   surface; **Collision clearance** adjusts the gap. It supplements the game's spring
@@ -91,6 +121,8 @@ Ctrl+Z undoes a joint change.
 | What | Where |
 | --- | --- |
 | Saved PNGs and videos | `Pictures\UmaStudio\renders` |
+| Editable animation projects | `Pictures\UmaStudio\animations` |
+| Converted Humanoid clips, private Unity project and import log | `%LOCALAPPDATA%\UmaStudio\animation-import` |
 | Your pictures (for props and backgrounds) | `Pictures\UmaStudio\images` |
 | Converted characters, props, backgrounds | `Pictures\UmaStudio\viewer-cache\<region-and-source>` |
 | Game folders and selected region | `%LOCALAPPDATA%\UmaStudio\game.json` |
@@ -129,7 +161,7 @@ The tests do not require an installed game. Local builds can run the same checks
 To publish a release, update `VERSION` in `viewer/serve.py`, add
 `docs/releases/<version>.md`, and commit and push the changes to `main`.
 After the build and tests pass, the workflow creates the matching tag (for example,
-`v0.1.2`) on that exact tested commit and publishes the ZIP, checksum and release notes.
+`v0.1.3`) on that exact tested commit and publishes the ZIP, checksum and release notes.
 You do not need to create or push the tag yourself.
 
 Existing published versions are left unchanged. If a tag already points to a different
