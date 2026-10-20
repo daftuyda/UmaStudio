@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: windows-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -54,13 +54,16 @@ jobs:
           retention-days: 14
 
   release:
-    name: Publish tagged release
+    name: Tag and publish release
     needs: build
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
+    concurrency:
+      group: release-${{ needs.build.outputs.version }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -74,16 +77,11 @@ jobs:
         env:
           VERSION: ${{ needs.build.outputs.version }}
         run: sha256sum --check "UmaStudio-${VERSION}.zip.sha256"
-      - name: Publish release with change summary
+      # GITHUB_TOKEN-created tags do not trigger another push workflow.
+      # Publish the already-tested artifact in this run.
+      - name: Create version tag and publish change summary
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          gh release create "$RELEASE_TAG" \
-            "release/UmaStudio-${VERSION}.zip" \
-            "release/UmaStudio-${VERSION}.zip.sha256" \
-            --verify-tag \
-            --title "UmaStudio ${VERSION}" \
-            --notes-file "docs/releases/${VERSION}.md"
+        run: python3 viewer/publish_release.py --version "$VERSION" --dist release

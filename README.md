@@ -127,19 +127,18 @@ The tests do not require an installed game. Local builds can run the same checks
 `.\viewer\build_exe.ps1 -RunTests` (Python 3.13 and Node.js 24).
 
 To publish a release, update `VERSION` in `viewer/serve.py`, add
-`docs/releases/<version>.md`, and commit and push the changes. Then push the matching
-tag, for example:
+`docs/releases/<version>.md`, and commit and push the changes to `main`.
+After the build and tests pass, the workflow creates the matching tag (for example,
+`v0.1.2`) on that exact tested commit and publishes the ZIP, checksum and release notes.
+You do not need to create or push the tag yourself.
 
-```powershell
-git tag v0.1.2
-git push origin v0.1.2
-```
-
-The workflow checks that the tag matches the app version, builds and tests the app,
-and publishes the ZIP and checksum using that version's release notes. Only tag
-pushes publish releases; branch, pull-request and manual builds produce artifacts.
+Existing published versions are left unchanged. If a tag already points to a different
+commit, the workflow skips publication; increase `VERSION` for the next release.
+An interrupted draft upload can be resumed by rerunning the same workflow.
+Manually pushed version tags are also supported and must match the app version.
+Pull-request and manual workflow runs only produce build artifacts.
 GitHub Actions must be enabled for the fork. No personal access token is needed.
-An existing release is not overwritten by a rerun.
+Tag creation and publication happen in the same run.
 
 ## Help
 
